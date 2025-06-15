@@ -1,44 +1,49 @@
-# SDR to HDR Video Converter
+# SDR to HDR Video Converter (Cross-Platform)
 
-A desktop application built with Python and PyQt5 that allows users to convert SDR (Standard Dynamic Range) videos into HDR (High Dynamic Range) format using FFmpeg with x265 encoding. Supports tone mapping, color space conversion, real-time preview, batch processing, and optional embedding of HDR10 static metadata.
+A Python + PyQt5 desktop application to convert SDR (Standard Dynamic Range) videos to HDR (High Dynamic Range) using FFmpeg with support for x264/x265 encoding. Offers tone mapping, HDR metadata embedding, color space conversion, batch conversion, and real-time preview.
 
 ---
 
 ## 🚀 Features
 
-- ✅ **SDR to HDR video conversion using FFmpeg (x265)**
-- 🎚️ **Tone mapping options**: Linear, Logarithmic, PQ (Perceptual Quantizer)
+- ✅ **SDR to HDR video conversion** using FFmpeg
+- 🎛️ **Tone mapping modes**: Linear, Logarithmic, PQ (Perceptual Quantizer)
+- 🔢 **Custom controls** for tone mapping parameters (gamma, scale, compression)
+- 🎚️ **Constant Quality (CRF) slider**
 - 🌈 **Color space conversion**: BT.709 to BT.2020
-- 📦 **Batch mode**: Convert entire folders of videos
-- 👁 **Real-time preview** of tone mapping effects
-- 📝 **Embed static HDR10 metadata**, including MaxCLL and MaxFALL
-- ✏️ **Manual or automatic metadata generation**
-- 🖱️ **Drag-and-drop interface**
-- 🛑 **Graceful cancellation** of ongoing conversions
+- 📝 **Static HDR10 metadata embedding** (MaxCLL, MaxFALL)
+- ⚙️ **Metadata estimation** or **manual override**
+- 📦 **Batch conversion mode** (process entire folders)
+- 👁️ **Real-time preview** of tone mapping
+- 🖱️ **Drag and drop support** for video files and folders
+- ❌ **Graceful cross-platform cancellation** of FFmpeg subprocesses
 
 ---
 
 ## 🖥️ GUI Overview
 
-- **Input Path**: Choose one or more video files or a folder
-- **Output Path**: Choose save location or output directory
-- **Tone Mapping**: Select the type of tone mapping
-- **Bit Depth**: 8-bit or 10-bit encoding
-- **Color Conversion**: Option to convert to BT.2020 color space
-- **Metadata Options**:
-  - Embed HDR10 metadata
-  - Generate static metadata (with override option)
+- **Input/Output**: Choose files or folders for conversion and output
+- **Tone Mapping**:
+  - Mode selection (Linear, Log, PQ)
+  - Dynamic controls per mode (e.g., PQ gamma, Log factor, Linear scale)
+- **Encoding Settings**:
+  - Output bit depth: 8 or 10-bit
+  - Constant Quality (CRF) slider
+- **Metadata Settings**:
+  - Embed HDR10
+  - Estimate from video
+  - Manually override MaxCLL/MaxFALL
 - **Modes**:
-  - Batch processing
-  - Real-time preview
-- **Cancel Button**: Interrupts FFmpeg safely and updates status accordingly
+  - Batch folder mode
+  - Real-time preview mode
+- **Cancel Button**: With confirmation prompt and safe termination
 
 ---
 
 ## 🛠️ Requirements
 
 - **Python 3.7+**
-- **FFmpeg** with `libx265` support installed and accessible in system PATH
+- **FFmpeg** (must be in system PATH and support libx264 or libx265)
 - Python packages:
   - `PyQt5`
   - `numpy`
@@ -55,25 +60,25 @@ pip install PyQt5 numpy opencv-python
 ## ▶️ How to Run
 
 ```bash
-python sdr_to_hdr_converter.py
+python SDR_to_HDR_cross_platform.py
 ```
 
 ---
 
 ## 🏗️ Build Executable (Optional)
 
-To create a standalone Windows executable:
+To build a Windows executable:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed sdr_to_hdr_converter.py
+pyinstaller --onefile --windowed SDR_to_HDR_cross_platform.py
 ```
 
-Executable will be in the `dist/` folder.
+> Executable will be created in the `dist/` folder.
 
 ---
 
-## 📂 Supported Formats
+## 📂 Supported Input Formats
 
 - `.mp4`
 - `.mov`
@@ -81,17 +86,18 @@ Executable will be in the `dist/` folder.
 
 ---
 
-## 📝 Notes
+## ⚠️ Notes
 
-- HDR metadata generation uses the first 30 frames of the video to estimate luminance.
-- Canceling a conversion will **gracefully terminate** the active FFmpeg process on both Windows and Unix platforms.
-- Tone mapping is previewed using OpenCV's imshow (close the window or press `q` to exit preview).
+- Metadata estimation uses the first 30 frames for luminance analysis.
+- Drag-and-drop accepts both individual files and directories (for batch mode).
+- Cancel button uses `CTRL_BREAK_EVENT` on Windows and `terminate()` on Unix-like systems.
+- Real-time preview opens a window via OpenCV; press `q` or close it to exit preview.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the MIT License.
+MIT License
 
 ---
 
@@ -101,8 +107,9 @@ Developed by Coolythecoder
 
 ---
 
-## ❤️ Acknowledgments
+## 🙌 Acknowledgments
 
 - [FFmpeg](https://ffmpeg.org/)
+- [x264](https://www.videolan.org/developers/x264.html)
 - [x265](https://x265.org/)
 - [PyQt5](https://riverbankcomputing.com/software/pyqt/)
