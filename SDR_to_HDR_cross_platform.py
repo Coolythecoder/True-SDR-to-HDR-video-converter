@@ -8,7 +8,6 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import platform
 import shutil
 
-
 class SDRtoHDRConverter(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -20,6 +19,18 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.current_process = None
         self.init_ui()
 
+    def update_tone_controls(self, text):
+        is_linear = text.lower() == "linear"
+        is_pq = text.lower() == "pq"
+        is_log = text.lower() == "log"
+
+        self.linear_scale_label.setVisible(is_linear)
+        self.linear_scale_input.setVisible(is_linear)
+        self.pq_gamma_label.setVisible(is_pq)
+        self.pq_gamma_input.setVisible(is_pq)
+        self.log_factor_label.setVisible(is_log)
+        self.log_factor_input.setVisible(is_log)
+
     def toggle_override_fields(self):
         enabled = self.override_metadata.isChecked()
         self.max_cll_input.setEnabled(enabled)
@@ -27,7 +38,6 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
 
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout()
-
         self.input_btn = QtWidgets.QPushButton("Select SDR Video")
         self.input_btn.clicked.connect(self.select_input_file)
         self.input_path = QtWidgets.QLineEdit()
@@ -45,6 +55,30 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.tone_map.addItems(["Linear", "Log", "PQ"])
         layout.addWidget(self.tone_map_label)
         layout.addWidget(self.tone_map)
+
+        self.linear_scale_label = QtWidgets.QLabel("Linear Scale Factor:")
+        self.linear_scale_input = QtWidgets.QDoubleSpinBox()
+        self.linear_scale_input.setRange(0.1, 5.0)
+        self.linear_scale_input.setValue(1.5)
+        layout.addWidget(self.linear_scale_label)
+        layout.addWidget(self.linear_scale_input)
+
+        self.pq_gamma_label = QtWidgets.QLabel("PQ Gamma Exponent:")
+        self.pq_gamma_input = QtWidgets.QDoubleSpinBox()
+        self.pq_gamma_input.setRange(0.1, 5.0)
+        self.pq_gamma_input.setValue(2.2)
+        layout.addWidget(self.pq_gamma_label)
+        layout.addWidget(self.pq_gamma_input)
+
+        self.log_factor_label = QtWidgets.QLabel("Log Compression Factor:")
+        self.log_factor_input = QtWidgets.QDoubleSpinBox()
+        self.log_factor_input.setRange(0.1, 10.0)
+        self.log_factor_input.setValue(1.0)
+        layout.addWidget(self.log_factor_label)
+        layout.addWidget(self.log_factor_input)
+
+        self.tone_map.currentTextChanged.connect(self.update_tone_controls)
+        self.update_tone_controls(self.tone_map.currentText())
 
         self.bit_depth_label = QtWidgets.QLabel("Output Bit Depth:")
         self.bit_depth = QtWidgets.QComboBox()
@@ -72,6 +106,19 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(self.batch_mode)
         layout.addWidget(self.preview_mode)
 
+        self.cq_label = QtWidgets.QLabel("Constant Quality (CRF):")
+        self.cq_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.cq_slider.setMinimum(0)
+        self.cq_slider.setMaximum(51)
+        self.cq_slider.setValue(23)
+        self.cq_slider.setTickInterval(1)
+        self.cq_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.cq_value_label = QtWidgets.QLabel("23")
+        self.cq_slider.valueChanged.connect(lambda val: self.cq_value_label.setText(str(val)))
+        layout.addWidget(self.cq_label)
+        layout.addWidget(self.cq_slider)
+        layout.addWidget(self.cq_value_label)
+
         self.start_btn = QtWidgets.QPushButton("Start Conversion")
         self.start_btn.clicked.connect(self.start_conversion)
         self.cancel_btn = QtWidgets.QPushButton("Cancel Conversion")
@@ -80,17 +127,13 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(self.start_btn)
         layout.addWidget(self.cancel_btn)
         layout.addWidget(self.status_label)
-
         self.setLayout(layout)
 
     def cancel_conversion(self):
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            'Cancel Conversion',
-            'Are you sure you want to cancel the conversion?',
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No
-        )
+        reply = QtWidgets.QMessageBox.question(self, 'Cancel Conversion',
+                                               'Are you sure you want to cancel the conversion?',
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                                               QtWidgets.QMessageBox.No)
         if reply == QtWidgets.QMessageBox.Yes:
             self.cancel_requested = True
             if self.current_process:
@@ -138,11 +181,14 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
 
     def apply_tone_mapping(self, frame, mode):
         if mode == "linear":
-            return np.clip(frame * 1.5, 0, 255)
+            factor = self.linear_scale_input.value()
+            return np.clip(frame * factor, 0, 255)
         elif mode == "log":
-            return np.clip(255 * np.log1p(frame) / np.log1p(255), 0, 255)
+            factor = self.log_factor_input.value()
+            return np.clip(255 * np.log1p(frame * factor) / np.log1p(255 * factor), 0, 255)
         elif mode == "pq":
-            return np.clip(255 * (frame / 255) ** 2.2, 0, 255)
+            gamma = self.pq_gamma_input.value()
+            return np.clip(255 * (frame / 255) ** gamma, 0, 255)
         return frame
 
     def estimate_hdr_metadata(self, video_path):
@@ -150,7 +196,6 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         max_luminance = 0
         frame_luminances = []
         frame_count = 0
-
         while frame_count < 30 and cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -159,112 +204,38 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             max_luminance = max(max_luminance, gray.max())
             frame_luminances.append(gray.mean())
             frame_count += 1
-
         cap.release()
         max_cll = int(max_luminance)
         max_fall = int(max(frame_luminances))
         return f"max-cll={max_cll},{max_fall}:max-fall={max_fall}"
 
     def start_conversion(self):
-        if not shutil.which("ffmpeg"):
-            self.status_label.setText("Status: ffmpeg not found in PATH.")
-            QtWidgets.QMessageBox.critical(self, "ffmpeg Not Found",
-                                           "ffmpeg executable is not found in your system PATH. Please install ffmpeg.")
+        input_path = self.input_path.text().strip()
+        output_path = self.output_path.text().strip()
+        if not input_path or not output_path:
+            self.status_label.setText("Status: Please specify input and output paths.")
             return
 
-        self.cancel_requested = False
-        self.current_process = None
-        input_data = self.input_path.text()
-        output_file = self.output_path.text()
-        tone = self.tone_map.currentText().lower()
+        crf_value = self.cq_slider.value()
+        tone_map_mode = self.tone_map.currentText().lower()
         bit_depth = self.bit_depth.currentText()
-        convert_color = self.color_convert.isChecked()
-        embed_meta = self.embed_metadata.isChecked()
-        batch = self.batch_mode.isChecked()
-        preview = self.preview_mode.isChecked()
 
-        if not input_data:
-            self.status_label.setText("Status: No input selected.")
-            return
-        if not output_file:
-            self.status_label.setText("Status: No output path selected.")
-            return
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", f"scale=1920:1080",
+            "-c:v", "libx264",
+            "-crf", str(crf_value),
+            "-pix_fmt", "yuv420p10le" if bit_depth == "10" else "yuv420p",
+            output_path
+        ]
 
-        self.status_label.setText("Status: Converting...")
-
-        input_paths = input_data.split(';')
-        files = []
-        for path in input_paths:
-            if os.path.isdir(path):
-                files.extend([os.path.join(path, f) for f in os.listdir(path) if f.endswith(('.mp4', '.mov', '.mkv'))])
-            elif os.path.isfile(path):
-                files.append(path)
-
-        for f in files:
-            if self.cancel_requested:
-                self.status_label.setText("Status: Conversion cancelled.")
-                return
-
-            out = os.path.join(output_file, os.path.basename(f)) if batch else output_file
-
-            if preview:
-                cap = cv2.VideoCapture(f)
-                while cap.isOpened():
-                    if self.cancel_requested:
-                        cap.release()
-                        cv2.destroyAllWindows()
-                        self.status_label.setText("Status: Conversion cancelled.")
-                        return
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    mapped = self.apply_tone_mapping(frame.astype(np.float32), tone)
-                    cv2.imshow("Preview", mapped.astype(np.uint8))
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                cap.release()
-                cv2.destroyAllWindows()
-                continue
-
-            cmd = [
-                "ffmpeg", "-i", f,
-                "-c:v", "libx265", "-preset", "slow", "-crf", "18",
-                "-color_primaries", "bt2020" if convert_color else "bt709",
-                "-color_trc", "smpte2084" if tone == "pq" else "bt709",
-                "-colorspace", "bt2020nc" if convert_color else "bt709"
-            ]
-
-            if embed_meta:
-                if self.generate_metadata.isChecked():
-                    if self.override_metadata.isChecked():
-                        cll = self.max_cll_input.text() or "1000"
-                        fall = self.max_fall_input.text() or "400"
-                        dynamic_metadata = f"max-cll={cll},{fall}:max-fall={fall}"
-                    else:
-                        dynamic_metadata = self.estimate_hdr_metadata(f)
-                    static_metadata = (
-                        "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:"
-                        "master-display=G(13250,34500)B(7500,3000)R(34000,16000)"
-                        "WP(15635,16450)L(10000000,1)"
-                    )
-                    metadata = f"hdr-opt=1:{static_metadata}:{dynamic_metadata}"
-                    cmd += ["-x265-params", metadata]
-                else:
-                    cmd += ["-x265-params", "hdr-opt=1"]
-
-            cmd += [out]
-
-            try:
-                self.current_process = subprocess.Popen(cmd)
-                self.current_process.wait()
-                if self.cancel_requested:
-                    self.status_label.setText("Status: Conversion cancelled.")
-                    return
-            except subprocess.CalledProcessError:
-                self.status_label.setText(f"Status: Failed on {f}")
-                return
-
-        self.status_label.setText("Status: Conversion complete.")
+        try:
+            self.status_label.setText("Status: Conversion in progress...")
+            self.current_process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.current_process.wait()
+            self.status_label.setText("Status: Conversion complete.")
+        except Exception as e:
+            self.status_label.setText(f"Status: Error - {str(e)}")
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
