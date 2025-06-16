@@ -2,11 +2,76 @@ import sys
 import os
 import subprocess
 import signal
+import platform
+import shutil
 import cv2
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
-import platform
-import shutil
+
+class ConversionThread(QtCore.QThread):
+    update_status = QtCore.pyqtSignal(str)
+    conversion_finished = QtCore.pyqtSignal()
+
+    def __init__(self, ffmpeg_cmd, parent=None):
+        super().__init__(parent)
+        self.ffmpeg_cmd = ffmpeg_cmd
+        self._process = None
+        self._cancel_requested = False
+
+    def run(self):
+        try:
+            self.update_status.emit("Status: Conversion in progress...")
+            self._process = subprocess.Popen(
+                self.ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            self._process.wait()
+            if self._cancel_requested:
+                self.update_status.emit("Status: Conversion canceled.")
+            else:
+                self.update_status.emit("Status: Conversion complete.")
+        except Exception as e:
+            self.update_status.emit(f"Status: Error - {str(e)}")
+        finally:
+            self.conversion_finished.emit()
+
+    def cancel(self):
+        self._cancel_requested = True
+        if self._process:
+            try:
+                if platform.system() == "Windows":
+                    self._process.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    self._process.terminate()
+            except Exception:
+                pass
+
+class MetadataThread(QtCore.QThread):
+    metadata_ready = QtCore.pyqtSignal(str)
+
+    def __init__(self, video_path, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+
+    def run(self):
+        cap = cv2.VideoCapture(self.video_path)
+        max_luminance = 0
+        frame_luminances = []
+        frame_count = 0
+        while frame_count < 30 and cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            max_luminance = max(max_luminance, gray.max())
+            frame_luminances.append(gray.mean())
+            frame_count += 1
+        cap.release()
+        max_cll = int(max_luminance)
+        max_fall = int(max(frame_luminances))
+        metadata = f"max-cll={max_cll},{max_fall}:max-fall={max_fall}"
+        self.metadata_ready.emit(metadata)
 
 class SDRtoHDRConverter(QtWidgets.QWidget):
     def __init__(self):
@@ -15,8 +80,8 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.setGeometry(100, 100, 600, 400)
         self.setAcceptDrops(True)
         self.default_style = self.styleSheet()
-        self.cancel_requested = False
-        self.current_process = None
+        self.conversion_thread = None
+        self.metadata_thread = None
         self.init_ui()
 
     def update_tone_controls(self, text):
@@ -129,20 +194,6 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(self.status_label)
         self.setLayout(layout)
 
-    def cancel_conversion(self):
-        reply = QtWidgets.QMessageBox.question(self, 'Cancel Conversion',
-                                               'Are you sure you want to cancel the conversion?',
-                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                                               QtWidgets.QMessageBox.No)
-        if reply == QtWidgets.QMessageBox.Yes:
-            self.cancel_requested = True
-            if self.current_process:
-                if platform.system() == "Windows":
-                    self.current_process.send_signal(signal.CTRL_BREAK_EVENT)
-                else:
-                    self.current_process.terminate()
-            self.status_label.setText("Status: Cancel requested...")
-
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             valid = any(url.toLocalFile().lower().endswith(('.mp4', '.mov', '.mkv')) or os.path.isdir(url.toLocalFile()) for url in event.mimeData().urls())
@@ -192,22 +243,12 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         return frame
 
     def estimate_hdr_metadata(self, video_path):
-        cap = cv2.VideoCapture(video_path)
-        max_luminance = 0
-        frame_luminances = []
-        frame_count = 0
-        while frame_count < 30 and cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            max_luminance = max(max_luminance, gray.max())
-            frame_luminances.append(gray.mean())
-            frame_count += 1
-        cap.release()
-        max_cll = int(max_luminance)
-        max_fall = int(max(frame_luminances))
-        return f"max-cll={max_cll},{max_fall}:max-fall={max_fall}"
+        self.metadata_thread = MetadataThread(video_path)
+        self.metadata_thread.metadata_ready.connect(self.handle_metadata_result)
+        self.metadata_thread.start()
+
+    def handle_metadata_result(self, metadata):
+        print(f"Estimated Metadata: {metadata}")
 
     def start_conversion(self):
         input_path = self.input_path.text().strip()
@@ -229,13 +270,23 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             output_path
         ]
 
-        try:
-            self.status_label.setText("Status: Conversion in progress...")
-            self.current_process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.current_process.wait()
-            self.status_label.setText("Status: Conversion complete.")
-        except Exception as e:
-            self.status_label.setText(f"Status: Error - {str(e)}")
+        self.conversion_thread = ConversionThread(ffmpeg_cmd)
+        self.conversion_thread.update_status.connect(self.status_label.setText)
+        self.conversion_thread.conversion_finished.connect(self.on_conversion_finished)
+        self.conversion_thread.start()
+
+    def cancel_conversion(self):
+        reply = QtWidgets.QMessageBox.question(self, 'Cancel Conversion',
+                                               'Are you sure you want to cancel the conversion?',
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                                               QtWidgets.QMessageBox.No)
+        if reply == QtWidgets.QMessageBox.Yes:
+            if self.conversion_thread and self.conversion_thread.isRunning():
+                self.conversion_thread.cancel()
+                self.status_label.setText("Status: Cancel requested...")
+
+    def on_conversion_finished(self):
+        self.conversion_thread = None
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
