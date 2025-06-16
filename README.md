@@ -1,49 +1,48 @@
 # SDR to HDR Video Converter (Cross-Platform)
 
-A Python + PyQt5 desktop application to convert SDR (Standard Dynamic Range) videos to HDR (High Dynamic Range) using FFmpeg with support for x264/x265 encoding. Offers tone mapping, HDR metadata embedding, color space conversion, batch conversion, and real-time preview.
+A Python + PyQt5 desktop application to convert SDR (Standard Dynamic Range) videos to HDR (High Dynamic Range) using FFmpeg. Supports advanced tone mapping, GPU acceleration, HDR10 metadata embedding, batch mode, and real-time logging.
 
 ---
 
 ## 🚀 Features
 
 - ✅ **SDR to HDR video conversion** using FFmpeg
+- ⚡ **GPU acceleration** with NVENC (with auto fallback to CPU/x265)
+- 🧠 **Auto encoder switching** based on FFmpeg availability
 - 🎛️ **Tone mapping modes**: Linear, Logarithmic, PQ (Perceptual Quantizer)
-- 🔢 **Custom controls** for tone mapping parameters (gamma, scale, compression)
+- 🔢 **Custom tone mapping controls** (gamma, scale, compression)
 - 🎚️ **Constant Quality (CRF) slider**
 - 🌈 **Color space conversion**: BT.709 to BT.2020
-- 📝 **Static HDR10 metadata embedding** (MaxCLL, MaxFALL)
-- ⚙️ **Metadata estimation** or **manual override**
-- 📦 **Batch conversion mode** (process entire folders)
-- 👁️ **Real-time preview** of tone mapping
-- 🖱️ **Drag and drop support** for video files and folders
-- ❌ **Graceful cross-platform cancellation** of FFmpeg subprocesses
+- 📊 **HDR10 metadata**: auto-generate or manually override `MaxCLL`, `MaxFALL`, `master-display`
+- 📝 **`-x265-params`** integration for HDR metadata (compatible with libx265)
+- 🖥️ **Real-time FFmpeg log viewer**
+- 📦 **Batch conversion mode** (process folders)
+- 👁️ **Real-time tone mapping preview**
+- 🖱️ **Drag and drop support** for video files and directories
+- ❌ **Safe cancellation** of conversions (Windows & Linux)
 
 ---
 
 ## 🖥️ GUI Overview
 
-- **Input/Output**: Choose files or folders for conversion and output
-- **Tone Mapping**:
-  - Mode selection (Linear, Log, PQ)
-  - Dynamic controls per mode (e.g., PQ gamma, Log factor, Linear scale)
-- **Encoding Settings**:
-  - Output bit depth: 8 or 10-bit
-  - Constant Quality (CRF) slider
-- **Metadata Settings**:
-  - Embed HDR10
-  - Estimate from video
-  - Manually override MaxCLL/MaxFALL
-- **Modes**:
-  - Batch folder mode
-  - Real-time preview mode
-- **Cancel Button**: With confirmation prompt and safe termination
+- **Input/Output**: File and folder dialogs with fixed syntax
+- **Tone Mapping**: Choose Linear, PQ, or Log; each with dynamic controls
+- **Encoding Options**:
+  - Bit depth: 8-bit or 10-bit
+  - CRF slider (0–51)
+  - GPU toggle (NVENC)
+- **HDR Metadata Options**:
+  - Estimate or override MaxCLL/MaxFALL
+  - Embed static HDR10 metadata
+- **Log Output**: Real-time FFmpeg log monitor
+- **Execution**: Batch mode, preview mode, and a cancel-safe exit
 
 ---
 
 ## 🛠️ Requirements
 
 - **Python 3.7+**
-- **FFmpeg** (must be in system PATH and support libx264 or libx265)
+- **FFmpeg** (in PATH, with libx265, nvenc, or libx264 support)
 - Python packages:
   - `PyQt5`
   - `numpy`
@@ -60,21 +59,21 @@ pip install PyQt5 numpy opencv-python
 ## ▶️ How to Run
 
 ```bash
-python SDR_to_HDR_cross_platform.py
+python SDR_to_HDR_cross_platform_GPU_FINAL_OK.py
 ```
 
 ---
 
 ## 🏗️ Build Executable (Optional)
 
-To build a Windows executable:
+To build a standalone executable:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed SDR_to_HDR_cross_platform.py
+pyinstaller --onefile --windowed SDR_to_HDR_cross_platform_GPU_FINAL_OK.py
 ```
 
-> Executable will be created in the `dist/` folder.
+> Output will be in the `dist/` directory.
 
 ---
 
@@ -88,10 +87,11 @@ pyinstaller --onefile --windowed SDR_to_HDR_cross_platform.py
 
 ## ⚠️ Notes
 
-- Metadata estimation uses the first 30 frames for luminance analysis.
-- Drag-and-drop accepts both individual files and directories (for batch mode).
-- Cancel button uses `CTRL_BREAK_EVENT` on Windows and `terminate()` on Unix-like systems.
-- Real-time preview opens a window via OpenCV; press `q` or close it to exit preview.
+- HDR metadata is only embedded when using `libx265` or `hevc_nvenc`
+- If GPU encoding is unavailable, app falls back to CPU-based x265
+- FFmpeg output is streamed to the log viewer in real time
+- Cancel safely terminates long-running conversions
+- Preview mode uses OpenCV window (press `q` to exit)
 
 ---
 
