@@ -265,7 +265,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         if use_gpu:
             ffmpeg_cmd += ["-hwaccel", "cuda"]
 
-        ffmpeg_cmd += ["-i", input_path, "-vf", "scale=1920:1080"]
+        ffmpeg_cmd += ["-i", input_path]
 
         # HDR metadata flags will be added *after* the codec is defined to avoid parser errors
         if self.embed_metadata.isChecked() or self.generate_metadata.isChecked():
