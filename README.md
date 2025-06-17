@@ -1,6 +1,6 @@
 # SDR to HDR Video Converter (Cross-Platform)
 
-A Python + PyQt5 desktop application to convert SDR (Standard Dynamic Range) videos to HDR (High Dynamic Range) using FFmpeg. Supports advanced tone mapping, GPU acceleration, HDR10 metadata embedding, batch mode, and real-time logging.
+A Python + PyQt5 desktop application to convert SDR (Standard Dynamic Range) videos to HDR (High Dynamic Range) using FFmpeg. Supports advanced tone mapping, GPU acceleration, HDR10 metadata embedding, batch mode, **optional audio passthrough**, and real-time logging.
 
 ---
 
@@ -13,6 +13,7 @@ A Python + PyQt5 desktop application to convert SDR (Standard Dynamic Range) vid
 - 🔢 **Custom tone mapping controls** (gamma, scale, compression)
 - 🎚️ **Constant Quality (CRF) slider**
 - 🌈 **Color space conversion**: BT.709 to BT.2020
+- 🔊 **Audio passthrough toggle**: retain original audio or re-encode to AAC
 - 📊 **HDR10 metadata**: auto-generate or manually override `MaxCLL`, `MaxFALL`, `master-display`
 - 📝 **`-x265-params`** integration for HDR metadata (compatible with libx265)
 - 🖥️ **Real-time FFmpeg log viewer**
@@ -31,6 +32,7 @@ A Python + PyQt5 desktop application to convert SDR (Standard Dynamic Range) vid
   - Bit depth: 8-bit or 10-bit
   - CRF slider (0–51)
   - GPU toggle (NVENC)
+  - **Audio Passthrough**: Optional toggle to copy original audio stream
 - **HDR Metadata Options**:
   - Estimate or override MaxCLL/MaxFALL
   - Embed static HDR10 metadata
@@ -59,7 +61,7 @@ pip install PyQt5 numpy opencv-python
 ## ▶️ How to Run
 
 ```bash
-python SDR_to_HDR_cross_platform_GPU_FINAL_OK.py
+python SDR_to_HDR_cross_platform_audio_passthrough.py
 ```
 
 ---
@@ -70,7 +72,7 @@ To build a standalone executable:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed SDR_to_HDR_cross_platform_GPU_FINAL_OK.py
+pyinstaller --onefile --windowed SDR_to_HDR_cross_platform_audio_passthrough.py
 ```
 
 > Output will be in the `dist/` directory.
@@ -89,6 +91,7 @@ pyinstaller --onefile --windowed SDR_to_HDR_cross_platform_GPU_FINAL_OK.py
 
 - HDR metadata is only embedded when using `libx265` or `hevc_nvenc`
 - If GPU encoding is unavailable, app falls back to CPU-based x265
+- Audio passthrough only works with compatible input formats and codecs
 - FFmpeg output is streamed to the log viewer in real time
 - Cancel safely terminates long-running conversions
 - Preview mode uses OpenCV window (press `q` to exit)
