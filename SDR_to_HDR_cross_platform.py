@@ -168,6 +168,8 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.batch_mode = QtWidgets.QCheckBox("Batch Convert (folder)")
         self.preview_mode = QtWidgets.QCheckBox("Real-time Preview")
         self.gpu_checkbox = QtWidgets.QCheckBox("Use GPU Acceleration (NVENC)")
+        self.audio_passthrough = QtWidgets.QCheckBox("Enable Audio Passthrough")
+        layout.addWidget(self.audio_passthrough)
         layout.addWidget(self.color_convert)
         layout.addWidget(self.embed_metadata)
         layout.addWidget(self.generate_metadata)
@@ -352,10 +354,11 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 "-pix_fmt", "yuv420p10le" if bit_depth == "10" else "yuv420p"
             ]
 
-        ffmpeg_cmd += [
-            "-c:a", "aac", "-b:a", "128k",
-            output_path
-        ]
+        if self.audio_passthrough.isChecked():
+            ffmpeg_cmd += ["-c:a", "copy"]
+        else:
+            ffmpeg_cmd += ["-c:a", "aac", "-b:a", "128k"]
+        ffmpeg_cmd += [output_path]
 
         self.conversion_thread = ConversionThread(ffmpeg_cmd)
         self.conversion_thread.update_status.connect(self.status_label.setText)
