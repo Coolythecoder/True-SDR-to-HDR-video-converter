@@ -150,17 +150,11 @@ def probe_sdr_profile(ffprobe_exe, input_path):
     }
 
 
-def build_sdr_to_pq_filter(profile, white_nits=200, pixel_format="yuv420p10le"):
-    """Construct physically meaningful 10-bit PQ and BT.2020 pixel conversion.
+def build_sdr_to_linear_filter(profile):
+    """Validated SDR YUV to display-linear BT.2020 GBR float conversion.
 
-    zscale handles the SDR transfer (BT.1886-like display light), converting
-    to linear RGB in BT.2020. The second pass applies 200-nit white -> PQ;
-    its npl parameter is the *content white level*, NOT a 1000-nit peak.
+    The colour analysis and PQ encode share exactly this first transformation.
     """
-    if not isinstance(white_nits, int) or not 80 <= white_nits <= 400:
-        raise ValueError("HDR reference white must be between 80 and 400 nits.")
-    if pixel_format not in ("yuv420p10le", "p010le"):
-        raise ValueError("Unsupported HDR pixel format.")
     for key, choices in (
         ("matrix", MATRICES.values()),
         ("primaries", PRIMARIES.values()),
@@ -173,11 +167,22 @@ def build_sdr_to_pq_filter(profile, white_nits=200, pixel_format="yuv420p10le"):
     return (
         "zscale=rin={range}:min={matrix}:pin={primaries}:tin={transfer}:"
         "m=gbr:p=bt2020:t=linear:r=full,"
-        "format=gbrpf32le,"
-        "zscale=t=smpte2084:m=bt2020nc:p=bt2020:r=limited:"
-        "npl={white_nits}:d=error_diffusion,"
-        "format={pixel_format}"
-    ).format(white_nits=white_nits, pixel_format=pixel_format, **profile)
+        "format=gbrpf32le"
+    ).format(**profile)
+
+
+def build_sdr_to_pq_filter(profile, white_nits=200, pixel_format="yuv420p10le"):
+    """Apply the shared linear BT.2020 stage, then PQ and 10-bit output."""
+    if not isinstance(white_nits, int) or not 80 <= white_nits <= 400:
+        raise ValueError("HDR reference white must be between 80 and 400 nits.")
+    if pixel_format not in ("yuv420p10le", "p010le"):
+        raise ValueError("Unsupported HDR pixel format.")
+
+    return (
+        build_sdr_to_linear_filter(profile) +
+        ",zscale=t=smpte2084:m=bt2020nc:p=bt2020:r=limited:"
+        "npl={}:d=error_diffusion,format={}".format(white_nits, pixel_format)
+    )
 
 
 def x265_sdr_mastering_params(white_nits=200, max_cll=None, max_fall=0):
