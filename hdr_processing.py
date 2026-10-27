@@ -16,6 +16,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from creative_hdr import active_grade, build_creative_filter, creative_mastering_params
+
 
 DEFAULT_SDR_PROFILE = {
     "matrix": "bt709",
@@ -150,11 +152,8 @@ def probe_sdr_profile(ffprobe_exe, input_path):
     }
 
 
-def build_sdr_to_linear_filter(profile):
-    """Validated SDR YUV to display-linear BT.2020 GBR float conversion.
-
-    The colour analysis and PQ encode share exactly this first transformation.
-    """
+def build_sdr_to_linear_filter(profile, grade=None, white_nits=200):
+    """SDR to float BT.2020, with the same optional grade for scan and encode."""
     for key, choices in (
         ("matrix", MATRICES.values()),
         ("primaries", PRIMARIES.values()),
@@ -168,29 +167,27 @@ def build_sdr_to_linear_filter(profile):
         "zscale=rin={range}:min={matrix}:pin={primaries}:tin={transfer}:"
         "m=gbr:p=bt2020:t=linear:r=full,"
         "format=gbrpf32le"
-    ).format(**profile)
+    ).format(**profile) + build_creative_filter(grade, white_nits)
 
 
-def build_sdr_to_pq_filter(profile, white_nits=200, pixel_format="yuv420p10le"):
-    """Apply the shared linear BT.2020 stage, then PQ and 10-bit output."""
+def build_sdr_to_pq_filter(profile, white_nits=200, pixel_format="yuv420p10le", grade=None):
+    """Apply the shared graded linear BT.2020 stage, then PQ and 10-bit output."""
     if not isinstance(white_nits, int) or not 80 <= white_nits <= 400:
         raise ValueError("HDR reference white must be between 80 and 400 nits.")
     if pixel_format not in ("yuv420p10le", "p010le"):
         raise ValueError("Unsupported HDR pixel format.")
 
     return (
-        build_sdr_to_linear_filter(profile) +
+        build_sdr_to_linear_filter(profile, grade=grade, white_nits=white_nits) +
         ",zscale=t=smpte2084:m=bt2020nc:p=bt2020:r=limited:"
         "npl={}:d=error_diffusion,format={}".format(white_nits, pixel_format)
     )
 
 
-def x265_sdr_mastering_params(white_nits=200, max_cll=None, max_fall=0):
-    """Default static SEI based on the documented BT.709 SDR mastering source.
-
-    BT.709 source display primaries, D65 and output white level per MovieLabs.
-    Unknown MaxFALL is explicitly signalled as zero, not guessed.
-    """
+def x265_sdr_mastering_params(white_nits=200, max_cll=None, max_fall=0, grade=None):
+    """Static SEI: original SDR master or an explicit virtual creative target."""
+    if active_grade(grade):
+        return creative_mastering_params(grade, white_nits, max_cll, max_fall)
     if not isinstance(white_nits, int) or not 80 <= white_nits <= 400:
         raise ValueError("Invalid HDR white level.")
     if max_cll is None:
