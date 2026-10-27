@@ -10,7 +10,7 @@ from unittest import mock
 
 from hdr_processing import DEFAULT_SDR_PROFILE
 from youtube_hdr_export import (
-    YOUTUBE_CRF, YOUTUBE_SUFFIX, _mp4_moov_before_mdat,
+    YOUTUBE_CRF, YOUTUBE_SUFFIX, _mp4_moov_before_mdat, _mp4_has_edit_list,
     build_youtube_hdr_command, supports_libx265,
     validate_youtube_source, verify_youtube_hdr_file,
 )
@@ -33,7 +33,9 @@ class YouTubePresetTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-colorspace") + 1], "bt2020nc")
         self.assertEqual(cmd[cmd.index("-pix_fmt") + 1], "yuv420p10le")
         self.assertEqual(cmd[cmd.index("-tag:v") + 1], "hvc1")
-        self.assertEqual(cmd[cmd.index("-movflags") + 1], "+faststart")
+        self.assertIn("+faststart", cmd[cmd.index("-movflags") + 1])
+        self.assertIn("+negative_cts_offsets", cmd[cmd.index("-movflags") + 1])
+        self.assertEqual(cmd[cmd.index("-use_editlist") + 1], "0")
         self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
         self.assertEqual(cmd[cmd.index("-ar") + 1], "48000")
         self.assertEqual(cmd[cmd.index("-ac") + 1], "2")
@@ -122,7 +124,7 @@ class YouTubeVerificationTests(unittest.TestCase):
         self.video = Path(self.temp.name) / "sample.mp4"
         self.video.write_bytes(
             _box(b"ftyp", b"iso6" + b"\x00" * 12) +
-            _box(b"moov", b"x" * 120) +
+            _box(b"moov", _box(b"trak", _box(b"tkhd", b"x" * 80))) +
             _box(b"mdat", b"a" * 200)
         )
         self.probe_data = {"streams": [{
@@ -146,6 +148,23 @@ class YouTubeVerificationTests(unittest.TestCase):
         self.assertTrue(_mp4_moov_before_mdat(self.video))
         self.video.write_bytes(_box(b"ftyp", b"iso6") + _box(b"mdat", b"a" * 200) + _box(b"moov", b"x" * 100))
         self.assertFalse(_mp4_moov_before_mdat(self.video))
+
+    def test_absent_edit_list_is_accepted_and_present_edit_list_rejected(self):
+        self.assertFalse(_mp4_has_edit_list(self.video))
+        trak = _box(
+            b"trak",
+            _box(b"tkhd", b"x" * 80) +
+            _box(b"edts", _box(b"elst", b"\x00" * 16))
+        )
+        self.video.write_bytes(
+            _box(b"ftyp", b"iso6" + b"\x00" * 12) +
+            _box(b"moov", trak) +
+            _box(b"mdat", b"a" * 200)
+        )
+        self.assertTrue(_mp4_has_edit_list(self.video))
+        with mock.patch("youtube_hdr_export._probe", return_value=self.probe_data):
+            with self.assertRaisesRegex(ValueError, "edit lists"):
+                verify_youtube_hdr_file("ffprobe", str(self.video))
 
     def test_output_verification_checks_hdr_sei_and_audio(self):
         proc = mock.Mock(returncode=0, stdout=json.dumps(self.frames), stderr="")
