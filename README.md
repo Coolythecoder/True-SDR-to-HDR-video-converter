@@ -111,8 +111,8 @@ pyinstaller --onefile --windowed SDR_to_HDR_cross_platform.py
 
 1. Select an SDR video and an existing output folder (or use batch mode).
 2. Click **Export YouTube HDR MP4** rather than **Start Conversion**.
-3. The preset converts SDR video into 10-bit Rec.2020/PQ using the existing colour-accurate zscale pipeline, encodes HEVC Main 10 with CPU/libx265 and embeds ST 2086 mastering + content-light metadata. It also transcodes the first audio stream to 48 kHz stereo AAC at 384 kb/s (downmixing multichannel audio) and writes an MP4 with the moov atom at the beginning.
-4. After FFmpeg finishes, FFprobe verifies the HEVC Main 10 profile, 10-bit format, PQ/Rec.2020 signalling, static HDR10 SEI, audio characteristics, and MP4 fast-start structure. If validation fails, the app reports an error instead of success.
+3. The preset converts SDR video into 10-bit Rec.2020/PQ using the existing colour-accurate zscale pipeline, encodes HEVC Main 10 with CPU/libx265 and embeds ST 2086 mastering + content-light metadata. It also transcodes the first audio stream to 48 kHz stereo AAC at 384 kb/s (downmixing multichannel audio) and writes an MP4 with the moov atom at the beginning and with MP4 edit lists disabled.
+4. After FFmpeg finishes, FFprobe verifies the HEVC Main 10 profile, 10-bit format, PQ/Rec.2020 signalling, static HDR10 SEI, audio characteristics, and MP4 fast-start structure without edit lists. If validation fails, the app reports an error instead of success.
 5. Upload the resulting `*_YouTube_HDR.mp4` through YouTube Studio normally. There is no automatic upload or OAuth integration.
 
 **Source requirements:** progressive, even dimensions, at least 720 pixels on the shorter edge, common YouTube HDR frame rates (23.976/24/25/29.97/30/48/50/59.94/60 fps), tagged or correctly assumed SDR BT.709 primaries. Explicitly non-BT.709 sources, existing PQ/HLG HDR, interlaced footage and unsupported sizes/rates are rejected by this preset; use the standard converter for other material. The preset preserves input frame rate and dimensions rather than silently resampling.
