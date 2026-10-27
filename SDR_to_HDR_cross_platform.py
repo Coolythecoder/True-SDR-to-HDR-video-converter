@@ -62,6 +62,10 @@ class ConversionThread(QtCore.QThread):
                         self._cancel_requested = True
                         break
                     except Exception as exc:
+                        # Windows can raise OSError if a running pipe is
+                        # terminated during Cancel; treat that as cancellation.
+                        if self._cancel_requested:
+                            break
                         failed += 1
                         self.log_output.emit(
                             "YouTube export analysis failed for {}: {}".format(name, exc)
