@@ -195,7 +195,12 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.max_fall_input.setPlaceholderText("MaxFALL")
         self.override_metadata.stateChanged.connect(self.toggle_override_fields)
         self.batch_mode = QtWidgets.QCheckBox("Batch Convert (folder)")
-        self.preview_mode = QtWidgets.QCheckBox("Real-time Preview")
+        self.preview_mode = QtWidgets.QCheckBox("Real-time Preview (not implemented)")
+        self.preview_mode.setEnabled(False)
+        self.preview_mode.setToolTip(
+            "The app does not yet contain an HDR preview. "
+            "Check the finished clip in an HDR-capable player."
+        )
         self.gpu_checkbox = QtWidgets.QCheckBox("Use GPU Acceleration (NVENC)")
         self.audio_passthrough = QtWidgets.QCheckBox("Enable Audio Passthrough")
         layout.addWidget(self.audio_passthrough)
