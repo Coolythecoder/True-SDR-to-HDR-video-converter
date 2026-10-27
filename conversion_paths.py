@@ -26,7 +26,7 @@ def plan_conversion_jobs(input_path, output_path, batch_mode, output_suffix="_HD
     Normally the output is an existing folder. A manually entered .mp4 file
     path is accepted for a single conversion to preserve previous usage.
     """
-    if output_suffix not in ("_HDR", "_SDR", "_YouTube_HDR"):
+    if output_suffix not in ("_HDR", "_SDR", "_YouTube_HDR", "_HDR_GPU"):
         raise ValueError("Unsupported output filename suffix.")
 
     source = Path(input_path).expanduser()
@@ -51,7 +51,7 @@ def plan_conversion_jobs(input_path, output_path, batch_mode, output_suffix="_HD
         )
         # Avoid re-processing last run's output when both folders are the same.
         if source.resolve() == destination.resolve():
-            videos = [path for path in videos if not path.stem.casefold().endswith(("_hdr", "_sdr", "_youtube_hdr"))]
+            videos = [path for path in videos if not path.stem.casefold().endswith(("_hdr", "_sdr", "_youtube_hdr", "_hdr_gpu"))]
     else:
         if not source.is_file() or source.suffix.lower() not in VIDEO_EXTENSIONS:
             raise ValueError("Select an existing MP4, MOV or MKV input video.")

@@ -4,6 +4,11 @@ on:
   push:
     branches: ['feat/optional-cuda-only-export']
   pull_request:
+    paths:
+      - '**.py'
+      - 'requirements-gpu-only.txt'
+      - 'GPU_ONLY_MODE.md'
+      - '.github/workflows/windows-gpu-only.yml'
 
 permissions:
   contents: read
@@ -19,50 +24,30 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Install application and optional CUDA dependencies
+      - name: Install pinned optional CUDA dependencies and build tools
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install PyQt5 numpy opencv-python-headless pyinstaller "cupy-cuda12x>=13.6,<14" "PyNvVideoCodec>=2.0,<3" "nvidia-cuda-runtime-cu12>=12.8,<12.9" "nvidia-cuda-nvrtc-cu12>=12.8,<12.9"
-      - name: Record dependency API and versions
+          python -m pip install -r requirements-gpu-only.txt
+          python -m pip install "pyinstaller>=6.16,<7"
+          choco install ffmpeg --yes --no-progress
+      - name: Compile generated CUDA kernels without GPU hardware
+        run: python validate_cuda_build.py
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Build Windows folder executable
+        run: python build_gpu_only.py
+      - name: Smoke-test packaged GUI and inspect CUDA bundle
         shell: python
         run: |
-          import importlib.metadata as md, pathlib, shutil
-          root = pathlib.Path('cuda_dependency_evidence')
-          root.mkdir(exist_ok=True)
-          for name in ('PyNvVideoCodec', 'cupy-cuda12x', 'nvidia-cuda-runtime-cu12', 'nvidia-cuda-nvrtc-cu12'):
-              dist = md.distribution(name)
-              print(name, dist.version)
-              (root / (name + '-metadata.txt')).write_text(str(dist.metadata), encoding='utf-8')
-              if name == 'PyNvVideoCodec':
-                  for path in dist.files or []:
-                      if str(path).endswith(('.py', '.pyi', '.json', '.md', '.txt')):
-                          src = pathlib.Path(dist.locate_file(path))
-                          if src.is_file() and src.stat().st_size < 1000000:
-                              target = root / str(path).replace('..', '_')
-                              target.parent.mkdir(parents=True, exist_ok=True)
-                              shutil.copyfile(src, target)
-          import cupy
-          print('CuPy import:', cupy.__version__)
-          try:
-              import PyNvVideoCodec as nvc
-              print('NVIDIA codec import:', nvc.__file__)
-              for name in ('CreateEncoder', 'SimpleDecoder', 'ThreadedDecoder', 'CreateDecoder'):
-                  (root / (name + '-doc.txt')).write_text(str(getattr(nvc, name).__doc__), encoding='utf-8')
-          except Exception as exc:
-              print('CPU-host codec import limitation:', repr(exc))
+          from pathlib import Path
+          import subprocess
+          root = Path('dist/HDRVideoStudio-GPU')
+          assert (root / 'HDRVideoStudio-GPU.exe').is_file()
+          assert list((root / '_internal/cuda/bin').glob('nvrtc64_*.dll'))
+          assert list((root / '_internal/PyNvVideoCodec').glob('*.pyd'))
+          assert (root / '_internal/cuda/include/cuda_runtime.h').is_file()
+          subprocess.run([str(root / 'HDRVideoStudio-GPU.exe'), '--smoke-test'], check=True, timeout=90)
+          print('Packaged GUI opened and exited normally. NVIDIA execution was not tested on this CPU runner.')
       - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: cuda-dependency-evidence
-          path: cuda_dependency_evidence
-          retention-days: 7
-      - name: Run tests and build when implementation is present
-        if: ${{ hashFiles('build_gpu_only.py') != '' }}
-        run: |
-          python -m unittest discover -s tests -v
-          python build_gpu_only.py
-      - uses: actions/upload-artifact@v4
-        if: ${{ hashFiles('dist/HDRVideoStudio-GPU/**') != '' }}
         with:
           name: HDRVideoStudio-GPU-Windows
           path: dist/HDRVideoStudio-GPU
