@@ -145,6 +145,7 @@ def sei_messages(settings, cll, fall):
         primaries = (8500, 39850, 6550, 2300, 35400, 14600)
         peak = settings.grade.peak_nits
     else:
+        primaries = (15000, 30000, 7500, 3000, 32000, 32000)
         primaries = (15000, 30000, 7500, 3000, 32000, 16500)
         peak = settings.white_nits
     mastering = struct.pack('>8H2I', *primaries, 15635, 16450, round(peak*10000), 0)
@@ -182,6 +183,7 @@ _DLL_HANDLES = []
 def load_cuda():
     """Lazy imports keep the normal application usable without CUDA packages."""
     import sys
+    import ctypes
     root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
     bundled = root / 'cuda'
     if bundled.is_dir():
@@ -194,6 +196,12 @@ def load_cuda():
         for path in paths:
             if path.is_dir():
                 _DLL_HANDLES.append(os.add_dll_directory(str(path)))
+                os.environ['PATH'] = str(path) + os.pathsep + os.environ.get('PATH', '')
+                # NVRTC loads builtins internally; retain an absolute-path load
+                # as well as PATH for both source and frozen Windows editions.
+                for builtin in path.glob('nvrtc-builtins64_*.dll'):
+                    if '.alt.' not in builtin.name:
+                        _DLL_HANDLES.append(ctypes.WinDLL(str(builtin)))
     try:
         import cupy as cp
         import PyNvVideoCodec as nvc
@@ -288,41 +296,43 @@ def verify_output(ffprobe, path, info, count, cll, fall, cancelled, register):
 def validate_cuda_backend(cp, nvc, ffmpeg, ffprobe, source_info, settings, stream, cancelled, register, log):
     """Tiny startup reference/codec tests, never a CPU fallback for the movie."""
     from hdr_processing import build_sdr_to_linear_filter
-    info = SourceInfo(128, 64, source_info.bits, source_info.fps, source_info.time_base,
+    # Modern NVENC has a higher minimum width than the old 128-pixel probe.
+    width, height = 256, 256
+    info = SourceInfo(width, height, source_info.bits, source_info.fps, source_info.time_base,
                       source_info.full_range, source_info.centred)
     processor = CUDAProcessor(cp, info, settings)
     mult = 4 if info.bits == 10 else 1
     dtype = np.uint16 if info.bits == 10 else np.uint8
     profile = dict(matrix='bt709', primaries='bt709', transfer='bt709',
-                   range='full' if info.full_range else 'limited')
+                   range='full' if source_info.full_range else 'limited')
     log('GPU-only: running small CPU-reference and native NVENC self-tests before the full video.')
     with tempfile.TemporaryDirectory(prefix='hdr_cuda_check_') as td:
         input_file = Path(td) / 'probe.yuv'
         for y, u, v in ((16,128,128), (126,128,128), (235,128,128), (96,96,176)):
             if cancelled():
                 raise ExportCancelled()
-            host = np.empty((96,128),dtype=dtype)
-            host[:64] = y*mult
-            host[64:,0::2] = u*mult
-            host[64:,1::2] = v*mult
+            host = np.empty((height*3//2,width),dtype=dtype)
+            host[:height] = y*mult
+            host[height:,0::2] = u*mult
+            host[height:,1::2] = v*mult
             if info.bits == 10:
                 host <<= 6
             input_file.write_bytes(host.tobytes())
             device = cp.asarray(host)
-            frame = EncoderFrame(device,64,128)
+            frame = EncoderFrame(device,height,width)
             actual = processor.process(frame,linear_probe=True).get()
             raw = _run([ffmpeg,'-v','error','-f','rawvideo','-pixel_format',
-                        'p010le' if info.bits==10 else 'nv12','-video_size','128x64',
+                        'p010le' if info.bits==10 else 'nv12','-video_size',f'{width}x{height}',
                         '-i',str(input_file),'-vf',build_sdr_to_linear_filter(profile,settings.grade,settings.white_nits),
                         '-frames:v','1','-pix_fmt','gbrpf32le','-f','rawvideo','pipe:1'],cancelled,register)
-            if len(raw) != 128*64*12:
+            if len(raw) != width*height*12:
                 raise ValueError('Incomplete GPU-only CPU-reference self-test.')
-            reference = np.frombuffer(raw,dtype='<f4').reshape(3,64,128)[[2,0,1]]
+            reference = np.frombuffer(raw,dtype='<f4').reshape(3,height,width)[[2,0,1]]
             if not np.allclose(actual,reference,rtol=3e-4,atol=3e-5):
                 raise ValueError('CUDA colour self-test differs from the existing reference; no export started.')
         surface = processor.process(frame,encode=True)
         stream.synchronize()
-        encoder = nvc.CreateEncoder(128,64,'P010',False,cudacontext=int(cp.cuda.driver.ctxGetCurrent()),
+        encoder = nvc.CreateEncoder(width,height,'P010',False,cudacontext=int(cp.cuda.driver.ctxGetCurrent()),
                                     cudastream=stream.ptr,**encoder_parameters(info,settings))
         if info.fps.denominator != 1:
             p = encoder.GetEncodeReconfigureParams()
