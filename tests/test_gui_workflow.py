@@ -217,6 +217,92 @@ class GuiWorkflowTests(unittest.TestCase):
 
 
 
+    def test_youtube_quality_profiles_do_not_force_bitrate(self):
+        source = self.root / "video.mp4"
+        source.write_bytes(b"fake")
+        self.widget.input_path.setText(str(source))
+        self.widget.output_path.setText(str(self.root))
+        self.widget.youtube_analyse_light.setChecked(False)
+        self.widget.youtube_quality.setCurrentText("Maximum")
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value="ffprobe"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "supports_libx265", return_value=True), \
+             mock.patch.object(converter_module, "probe_sdr_profile",
+                               return_value=converter_module.DEFAULT_SDR_PROFILE), \
+             mock.patch.object(converter_module, "validate_youtube_source",
+                               return_value={"width": 1280, "height": 720, "has_audio": True}), \
+             mock.patch.object(converter_module.ConversionThread, "start"):
+            self.widget.start_youtube_export()
+        cmd = self.widget.conversion_thread.ffmpeg_commands[0]
+        self.assertEqual(cmd[cmd.index("-crf") + 1], "12")
+        self.assertEqual(cmd[cmd.index("-preset") + 1], "slow")
+        self.assertNotIn("-b:v", cmd)
+        self.assertIsNone(self.widget.conversion_thread.prepare_job)
+
+    def test_youtube_prepasses_change_metadata_and_optional_audio_filter(self):
+        source = self.root / "video.mp4"
+        source.write_bytes(b"fake")
+        self.widget.input_path.setText(str(source))
+        self.widget.output_path.setText(str(self.root))
+        self.widget.youtube_analyse_light.setChecked(True)
+        self.widget.youtube_normalize_audio.setChecked(True)
+        measurements = {
+            "input_i": "-26.9", "input_tp": "-10.5",
+            "input_lra": "7", "input_thresh": "-37",
+            "target_offset": "0.1",
+        }
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value="ffprobe"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "supports_libx265", return_value=True), \
+             mock.patch.object(converter_module, "probe_sdr_profile",
+                               return_value=converter_module.DEFAULT_SDR_PROFILE), \
+             mock.patch.object(converter_module, "validate_youtube_source",
+                               return_value={"width": 1280, "height": 720, "has_audio": True}), \
+             mock.patch.object(converter_module.ConversionThread, "start"):
+            self.widget.start_youtube_export()
+        worker = self.widget.conversion_thread
+        self.assertIsNotNone(worker.prepare_job)
+        original = worker.ffmpeg_commands[0]
+        with mock.patch.object(converter_module, "measure_content_light",
+                               return_value=(188, 70, 240)) as light, \
+             mock.patch.object(converter_module, "measure_audio_loudness",
+                               return_value=measurements) as audio:
+            final_command = worker.prepare_job(original, worker)
+        self.assertIn("max-cll=188,70", final_command[final_command.index("-x265-params") + 1])
+        self.assertIn("measured_I=-26.9", final_command[final_command.index("-af") + 1])
+        self.assertNotIn("-af", original)
+        self.assertIn("max-cll=200,0", original[original.index("-x265-params") + 1])
+        light.assert_called_once()
+        audio.assert_called_once()
+
+    def test_youtube_manual_metadata_takes_precedence_over_auto_analysis(self):
+        source = self.root / "video.mp4"
+        source.write_bytes(b"fake")
+        self.widget.input_path.setText(str(source))
+        self.widget.output_path.setText(str(self.root))
+        self.widget.youtube_analyse_light.setChecked(True)
+        self.widget.override_metadata.setChecked(True)
+        self.widget.max_cll_input.setText("180")
+        self.widget.max_fall_input.setText("90")
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value="ffprobe"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "supports_libx265", return_value=True), \
+             mock.patch.object(converter_module, "probe_sdr_profile",
+                               return_value=converter_module.DEFAULT_SDR_PROFILE), \
+             mock.patch.object(converter_module, "validate_youtube_source",
+                               return_value={"width": 1280, "height": 720, "has_audio": True}), \
+             mock.patch.object(converter_module.ConversionThread, "start"):
+            self.widget.start_youtube_export()
+        worker = self.widget.conversion_thread
+        self.assertIsNone(worker.prepare_job)
+        cmd = worker.ffmpeg_commands[0]
+        self.assertIn("max-cll=180,90", cmd[cmd.index("-x265-params") + 1])
+
+
+
 @unittest.skipIf(converter_module is None, "Requires PyQt5 and OpenCV")
 class WorkerTests(unittest.TestCase):
     @staticmethod
@@ -274,6 +360,30 @@ class WorkerTests(unittest.TestCase):
             worker.run()
         self.assertIn("1 succeeded", statuses[-1])
         verify.assert_called_once_with("video_YouTube_HDR.mp4")
+
+    def test_analysis_error_fails_job_without_launching_ffmpeg(self):
+        worker = converter_module.ConversionThread(
+            [["ffmpeg", "-i", "bad.mp4", "bad_hdr.mp4"]],
+            prepare_job=mock.Mock(side_effect=ValueError("Cannot analyse invalid HDR")),
+        )
+        statuses = []
+        worker.update_status.connect(statuses.append)
+        with mock.patch.object(converter_module.subprocess, "Popen") as spawn:
+            worker.run()
+        spawn.assert_not_called()
+        self.assertIn("1 failed", statuses[-1])
+
+    def test_analysis_cancellation_stops_queue_without_encoding(self):
+        worker = converter_module.ConversionThread(
+            [["ffmpeg", "-i", "input.mp4", "out.mp4"]],
+            prepare_job=mock.Mock(side_effect=converter_module.ExportCancelled()),
+        )
+        statuses = []
+        worker.update_status.connect(statuses.append)
+        with mock.patch.object(converter_module.subprocess, "Popen") as spawn:
+            worker.run()
+        spawn.assert_not_called()
+        self.assertIn("Canceled", statuses[-1])
 
     def test_cancel_terminates_process(self):
         worker = converter_module.ConversionThread([["ffmpeg", "-i", "a.mp4", "a_HDR.mp4"]])
