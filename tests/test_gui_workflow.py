@@ -62,6 +62,10 @@ class GuiWorkflowTests(unittest.TestCase):
         self.widget.input_path.setText(str(self.root))
         self.widget.output_path.setText(str(output))
         with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value="ffprobe"), \
+             mock.patch.object(converter_module, "probe_sdr_profile",
+                               return_value=converter_module.DEFAULT_SDR_PROFILE), \
              mock.patch.object(converter_module.ConversionThread, "start"):
             self.widget.start_conversion()
         commands = self.widget.conversion_thread.ffmpeg_commands
@@ -84,6 +88,78 @@ class GuiWorkflowTests(unittest.TestCase):
         cmd = self.widget.build_ffmpeg_command("ffmpeg", "in.mp4", "out.mp4", use_gpu=False)
         self.assertIn("libx265", cmd)
         self.assertIn("yuv420p10le", cmd)
+
+
+    def test_hdr_output_has_actual_pixel_conversion_and_colour_tags(self):
+        self.assertEqual(self.widget.bit_depth.currentText(), "10")
+        cmd = self.widget.build_ffmpeg_command(
+            "ffmpeg", "in.mp4", "out.mp4", use_gpu=False
+        )
+        self.assertIn("-vf", cmd)
+        filt = cmd[cmd.index("-vf") + 1]
+        self.assertIn("zscale=rin=limited:min=bt709", filt)
+        self.assertIn("format=gbrpf32le", filt)
+        self.assertIn("t=smpte2084", filt)
+        self.assertIn("npl=200", filt)
+        self.assertEqual(cmd[cmd.index("-color_primaries") + 1], "bt2020")
+        self.assertEqual(cmd[cmd.index("-color_trc") + 1], "smpte2084")
+        self.assertIn("-x265-params", cmd)
+
+    def test_8_bit_export_is_sdr_without_hdr_signalling(self):
+        self.widget.bit_depth.setCurrentText("8")
+        cmd = self.widget.build_ffmpeg_command("ffmpeg", "in.mp4", "out.mp4", use_gpu=False)
+        self.assertNotIn("-vf", cmd)
+        self.assertNotIn("-color_trc", cmd)
+        self.assertNotIn("-x265-params", cmd)
+        self.assertIn("libx264", cmd)
+        self.assertFalse(self.widget.hdr_reference_nits.isEnabled())
+
+    def test_hdr_reference_white_controls_mapping_and_mastering(self):
+        self.widget.hdr_reference_nits.setValue(150)
+        cmd = self.widget.build_ffmpeg_command("ffmpeg", "in.mp4", "out.mp4", use_gpu=False)
+        self.assertIn("npl=150", cmd[cmd.index("-vf") + 1])
+        self.assertIn("L(1500000,0)", cmd[cmd.index("-x265-params") + 1])
+
+    def test_invalid_static_metadata_cannot_launch(self):
+        self.widget.override_metadata.setChecked(True)
+        self.widget.max_cll_input.setText("200")
+        self.widget.max_fall_input.setText("999")
+        with self.assertRaisesRegex(ValueError, "MaxFALL"):
+            self.widget.build_ffmpeg_command("ffmpeg", "in.mp4", "out.mp4", use_gpu=False)
+
+    def test_non_bt709_source_skips_unjustified_mastering_sei(self):
+        profile = dict(converter_module.DEFAULT_SDR_PROFILE, primaries="bt2020")
+        cmd = self.widget.build_ffmpeg_command(
+            "ffmpeg", "in.mp4", "out.mp4", use_gpu=False, source_profile=profile
+        )
+        self.assertIn("pin=bt2020", cmd[cmd.index("-vf") + 1])
+        self.assertNotIn("-x265-params", cmd)
+
+    def test_rejects_hdr_source_metadata(self):
+        source = self.root / "video.mp4"
+        source.write_bytes(b"video")
+        self.widget.input_path.setText(str(source))
+        self.widget.output_path.setText(str(self.root))
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value="ffprobe"), \
+             mock.patch.object(converter_module, "probe_sdr_profile",
+                               side_effect=ValueError("Input is already HDR")):
+            self.widget.start_conversion()
+        self.assertIsNone(self.widget.conversion_thread)
+        self.assertIn("already HDR", self.widget.status_label.text())
+
+    def test_missing_zscale_is_reported(self):
+        source = self.root / "video.mp4"
+        source.write_bytes(b"video")
+        self.widget.input_path.setText(str(source))
+        self.widget.output_path.setText(str(self.root))
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=False):
+            self.widget.start_conversion()
+        self.assertIn("zscale", self.widget.status_label.text())
+        self.assertIsNone(self.widget.conversion_thread)
+
 
 
 @unittest.skipIf(converter_module is None, "Requires PyQt5 and OpenCV")
