@@ -20,12 +20,15 @@ def find_ffmpeg():
     return None
 
 
-def plan_conversion_jobs(input_path, output_path, batch_mode):
+def plan_conversion_jobs(input_path, output_path, batch_mode, output_suffix="_HDR"):
     """Return [(video_file, mp4_file), ...], never a directory as an input file.
 
     Normally the output is an existing folder. A manually entered .mp4 file
     path is accepted for a single conversion to preserve previous usage.
     """
+    if output_suffix not in ("_HDR", "_SDR"):
+        raise ValueError("Unsupported output filename suffix.")
+
     source = Path(input_path).expanduser()
     destination = Path(output_path).expanduser()
 
@@ -48,7 +51,7 @@ def plan_conversion_jobs(input_path, output_path, batch_mode):
         )
         # Avoid re-processing last run's output when both folders are the same.
         if source.resolve() == destination.resolve():
-            videos = [path for path in videos if not path.stem.casefold().endswith("_hdr")]
+            videos = [path for path in videos if not path.stem.casefold().endswith(("_hdr", "_sdr"))]
     else:
         if not source.is_file() or source.suffix.lower() not in VIDEO_EXTENSIONS:
             raise ValueError("Select an existing MP4, MOV or MKV input video.")
@@ -60,13 +63,13 @@ def plan_conversion_jobs(input_path, output_path, batch_mode):
     jobs = []
     used_outputs = set()
     for video in videos:
-        output = destination if explicit_file else destination / (video.stem + "_HDR.mp4")
+        output = destination if explicit_file else destination / (video.stem + output_suffix + ".mp4")
         if output.resolve() == video.resolve():
             raise ValueError("Output file cannot overwrite the input video.")
 
         # e.g. clip.mov and clip.mkv must not both overwrite clip_HDR.mp4.
         if str(output.resolve()).casefold() in used_outputs:
-            stem = "{}_{}_HDR".format(video.stem, video.suffix[1:].lower())
+            stem = "{}_{}{}".format(video.stem, video.suffix[1:].lower(), output_suffix)
             output = destination / (stem + ".mp4")
             number = 2
             while str(output.resolve()).casefold() in used_outputs:
