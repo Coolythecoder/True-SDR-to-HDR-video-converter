@@ -15,6 +15,7 @@ import time
 import numpy as np
 from creative_hdr import CreativeHDRSettings, active_grade, build_creative_filter
 from hdr_processing import build_sdr_to_linear_filter
+from gpu_float_transport import merge_float_planes
 
 # Explicitly require GPU devices in production. A numeric device is accepted by
 # the test harness to exercise the kernels using a software OpenCL implementation.
@@ -57,7 +58,7 @@ def kernel_source(grade=None, white_nits=200):
             lines += [
                 'float sy = fmax(luma(rgb), 0.0f);',
                 'float hi = fmax(rgb.x, fmax(rgb.y, rgb.z));',
-                'float lo = fmin(rgb.x, fmin(rgb.y, rgb.z));',
+                'float lo = fmin(rgb.x, fmin(rgb.y,rgb.z));',
                 'float v = 1.0f-clamp((hi-lo)/fmax(hi,1e-12f),0.0f,1.0f);',
                 'rgb = sy+(rgb-sy)*(%s*(1.0f+%s*v*v));' % (_f(grade.saturation), _f(grade.vibrance))]
         cap = grade.peak_nits / white_nits
@@ -169,12 +170,10 @@ class GPUPlan:
             for i, c in enumerate('rgb'):
                 graph.append(''.join('[{}{}{}]'.format(prefix,s,i) for s in 'rgb') +
                              program + 'grade_{},hwdownload,format=grayf32le[{}o{}]'.format(c,prefix,c))
-            # Separate grayscale hardware frames do not reliably retain colour
-            # properties. Reassert the KNOWN float linear BT.2020 interpretation
-            # after reassembly so the following PQ zscale cannot guess wrong.
-            graph.append(('[{0}og][{0}ob][{0}or]mergeplanes=0x001020:format=gbrpf32le,'
-                          'setparams=range=full:color_primaries=bt2020:'
-                          'color_trc=linear:colorspace=gbr').format(prefix))
+            # Legacy mergeplanes copies only half a float32 row. Reassemble
+            # through a lossless double-width transport and left crop instead;
+            # the same helper also restores the known linear BT.2020 tags.
+            graph.append(merge_float_planes(prefix))
         return ';'.join(graph)
 
     def export_command(self, command, profile):
