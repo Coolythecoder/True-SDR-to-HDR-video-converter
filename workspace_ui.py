@@ -112,6 +112,21 @@ def build_workspace(w):
     w.controls_tabs.addTab(_scroll(w.grade_page), 'Grade')
     w.export_page = QtWidgets.QWidget()
     exports = QtWidgets.QVBoxLayout(w.export_page)
+    performance = QtWidgets.QGroupBox('Processing acceleration')
+    pl = QtWidgets.QVBoxLayout(performance)
+    w.processing_gpu = _check('GPU grading and light analysis (Auto)', True)
+    w.processing_gpu.setToolTip(
+        'Uses float32 OpenCL when a GPU passes pixel checks; falls back to CPU. '
+        'Applies to preview and both HDR exports. Does not select the video encoder.')
+    w.hardware_decode = _check('Try NVIDIA hardware decoding (NVDEC)', True)
+    w.hardware_decode.setToolTip(
+        'Tests the actual source before use. Unsupported codecs/drivers use software. '
+        'Exports only; preview decoding remains software. Does not change x265 to NVENC.')
+    pl.addWidget(w.processing_gpu)
+    pl.addWidget(w.hardware_decode)
+    pl.addWidget(_label('YouTube keeps CPU x265 and your selected CRF/preset, HDR metadata and audio settings.'))
+    exports.addWidget(performance)
+    w.processing_gpu.toggled.connect(w.preview.engine.set_gpu_enabled)
     youtube = QtWidgets.QGroupBox('YouTube HDR export')
     yl = QtWidgets.QVBoxLayout(youtube)
     yl.addWidget(_label('10-bit HEVC · BT.2020/PQ · CPU x265\nSettings here apply to Export YouTube HDR.'))
@@ -140,7 +155,7 @@ def build_workspace(w):
     cl.addLayout(line)
     w.gpu_checkbox = _check('GPU encoding (NVENC)')
     w.audio_passthrough = _check('Copy original audio')
-    w.gpu_checkbox.setToolTip('Custom export only. Grading remains CPU-based; this NVENC path does not embed x265 static mastering SEI.')
+    w.gpu_checkbox.setToolTip('Custom export only. Grading acceleration is controlled separately; this NVENC path does not embed x265 static mastering SEI.')
     w.audio_passthrough.setToolTip('Only when the source audio codec is supported by the destination container.')
     cl.addWidget(w.gpu_checkbox)
     cl.addWidget(w.audio_passthrough)
