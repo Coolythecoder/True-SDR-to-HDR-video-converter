@@ -11,12 +11,15 @@ from cuda_colour import cuda_source
 
 
 def main():
+    import cupy
+    assert callable(cupy.cuda.driver.ctxGetCurrent)
     dist = md.distribution('nvidia-cuda-nvrtc-cu12')
     dlls = [Path(dist.locate_file(p)) for p in dist.files or []
-            if p.name.startswith('nvrtc64_') and p.suffix.lower() == '.dll']
+            if p.name.startswith('nvrtc64_') and p.suffix.lower() == '.dll' and '.alt.' not in p.name]
     if len(dlls) != 1:
-        raise RuntimeError('Cannot find the pinned NVRTC runtime.')
+        raise RuntimeError('Cannot identify primary NVRTC runtime: ' + repr(dlls))
     handles = [os.add_dll_directory(str(dlls[0].parent))]
+    print('Primary NVRTC:', dlls[0])
     nvrtc = C.WinDLL(str(dlls[0]))
     nvrtc.nvrtcCreateProgram.argtypes = [C.POINTER(C.c_void_p), C.c_char_p, C.c_char_p,
                                         C.c_int, C.c_void_p, C.c_void_p]

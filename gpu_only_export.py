@@ -268,6 +268,8 @@ def verify_output(ffprobe, path, info, count, cll, fall, cancelled, register):
                 'color_space': 'bt2020nc', 'color_range': 'tv', 'codec_tag_string': 'hvc1'}
     if any(v.get(k) != val for k, val in required.items()):
         raise ValueError('GPU-only output failed HEVC Main 10 / PQ / BT.2020 verification.')
+    if int(v.get('has_b_frames', 0)) != 0:
+        raise ValueError('Native encoder introduced B-frames; strict GPU-only timing verification failed.')
     if (v.get('width'), v.get('height')) != (info.width, info.height):
         raise ValueError('GPU-only output dimensions changed.')
     if Fraction(v['avg_frame_rate']) != info.fps or int(v['nb_read_packets']) != count:
@@ -320,7 +322,8 @@ def validate_cuda_backend(cp, nvc, ffmpeg, ffprobe, source_info, settings, strea
                 raise ValueError('CUDA colour self-test differs from the existing reference; no export started.')
         surface = processor.process(frame,encode=True)
         stream.synchronize()
-        encoder = nvc.CreateEncoder(128,64,'P010',False,cudastream=stream.ptr,**encoder_parameters(info,settings))
+        encoder = nvc.CreateEncoder(128,64,'P010',False,cudacontext=int(cp.cuda.driver.ctxGetCurrent()),
+                                    cudastream=stream.ptr,**encoder_parameters(info,settings))
         if info.fps.denominator != 1:
             p = encoder.GetEncodeReconfigureParams()
             p.frameRateNum,p.frameRateDen = info.fps.numerator,info.fps.denominator
@@ -366,6 +369,9 @@ def export_gpu_only(ffmpeg, ffprobe, source, destination, settings, log=print,
     cp, nvc = load_cuda()
     cp.cuda.Device(settings.device).use()
     stream = cp.cuda.Stream(non_blocking=False)
+    context = int(cp.cuda.driver.ctxGetCurrent())
+    if not context:
+        raise ValueError('No current CUDA context; GPU-only export was not started.')
     with stream:
         validate_cuda_backend(cp, nvc, ffmpeg, ffprobe, info, settings, stream, cancelled, register, log)
         processor = CUDAProcessor(cp, info, settings)
@@ -376,7 +382,7 @@ def export_gpu_only(ffmpeg, ffprobe, source, destination, settings, log=print,
             'CPU audio, mux and verification only; no CPU image-processing fallback.'.format(name))
         log('GPU-only native NVENC: Main 10, P4, constant QP {}, {} fps; centred chroma and ordered dither.'.format(settings.qp, info.fps))
         w, h = info.width, info.height
-        encoder = nvc.CreateEncoder(w, h, 'P010', False, cudastream=stream.ptr,
+        encoder = nvc.CreateEncoder(w, h, 'P010', False, cudacontext=context, cudastream=stream.ptr,
                                     **encoder_parameters(info, settings))
         if info.fps.denominator != 1:
             p = encoder.GetEncodeReconfigureParams()
@@ -384,7 +390,7 @@ def export_gpu_only(ffmpeg, ffprobe, source, destination, settings, log=print,
             encoder.Reconfigure(p)
 
         def frames():
-            decoder = nvc.SimpleDecoder(str(source), gpu_id=settings.device, cuda_stream=stream.ptr,
+            decoder = nvc.SimpleDecoder(str(source), gpu_id=settings.device, cuda_context=context, cuda_stream=stream.ptr,
                                         use_device_memory=True, output_color_type=nvc.OutputColorType.NATIVE)
             while True:
                 if cancelled():
@@ -421,7 +427,7 @@ def export_gpu_only(ffmpeg, ffprobe, source, destination, settings, log=print,
                 for frame in frames():
                     surface = processor.process(frame, encode=True)
                     stream.synchronize()
-                    output.write(bytes(encoder.Encode(surface, 0, sei if encoded == 0 else [])))
+                    output.write(bytes(encoder.Encode(surface, 0, sei)))
                     encoded += 1
                     if encoded % 120 == 0:
                         log('frame={} fps={:.1f} GPU-only NVENC'.format(encoded, encoded/max(.001,time.monotonic()-started)))
