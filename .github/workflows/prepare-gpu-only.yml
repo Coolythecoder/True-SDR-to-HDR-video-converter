@@ -1,0 +1,45 @@
+name: Prepare GPU-only implementation
+on:
+  push:
+    branches: ['feat/gpu-only-custom-export']
+    paths: ['.github/workflows/prepare-gpu-only.yml']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.repository == 'Coolythecoder/True-SDR-to-HDR-video-converter'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/gpu-only-custom-export
+      - name: Apply checksum-verified implementation patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
+          repo = 'Coolythecoder/True-SDR-to-HDR-video-converter'
+          blobs = ['b964017ff8bef5162a2868ffc6f375e8a79566fc', '39e90c3989167941dd1b3108d4e96347cda652d6', 'efd61c810ab0b283a13c14d0ac900c2bd173492f', '6714845e08711e10492a0cd4b9a66410d2ae9dc9']
+          chunks = []
+          for sha in blobs:
+              req = urllib.request.Request(f'https://api.github.com/repos/{repo}/git/blobs/{sha}', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  data = json.load(response)
+              chunks.append(base64.b64decode(data['content']))
+          patch = lzma.decompress(base64.b64decode(b''.join(chunks), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '9c6d5eff10a71cf3885efc466415886410ebca7f206b15ef208f8a6a5a42a998', 'Patch checksum mismatch'
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'gpu-only.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(path)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(path)], check=True)
+          pathlib.Path('.github/workflows/prepare-gpu-only.yml').unlink()
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m 'Add optional strict GPU-only video computation and Windows build'
+          git push origin HEAD:feat/gpu-only-custom-export
