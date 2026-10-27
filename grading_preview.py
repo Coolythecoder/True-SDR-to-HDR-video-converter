@@ -142,7 +142,7 @@ def viewing_filter(white_nits=200):
             'format=gbrp,format=rgb24')
 
 
-def render_command(ffmpeg, width, height, grade=None, white_nits=200):
+def render_command(ffmpeg, width, height, grade=None, white_nits=200, gpu_plan=None):
     """Return before/after pairs from the SAME cached float source frame."""
     grade = grade or CreativeHDRSettings()
     grade.validate(white_nits)
@@ -150,15 +150,20 @@ def render_command(ffmpeg, width, height, grade=None, white_nits=200):
         raise ValueError('Invalid preview dimensions.')
     view = viewing_filter(white_nits)
     change = build_creative_filter(grade, white_nits).lstrip(',')
+    if gpu_plan is not None:
+        if gpu_plan.grade != grade or gpu_plan.white_nits != white_nits:
+            raise ValueError('GPU preview settings differ from the requested grade.')
+        change = gpu_plan.filter(prefix='pgpu')
     after = (change + ',' if change else '') + view
     # Rawvideo transport does not carry metadata. Restore the known float
     # colour interpretation before the display transform, rather than guess.
     graph = ('[0:v]setparams=range=full:color_primaries=bt2020:'
              'color_trc=linear:colorspace=gbr,split=2[a][b];[a]' + view + '[before];[b]' + after +
              '[after];[before][after]hstack=inputs=2,format=rgb24[out]')
-    return [ffmpeg, '-hide_banner', '-nostdin', '-v', 'error',
+    command = [ffmpeg, '-hide_banner', '-nostdin', '-v', 'error',
             '-f', 'rawvideo', '-pixel_format', 'gbrpf32le',
             '-video_size', '{}x{}'.format(width, height), '-framerate', '1',
             '-i', 'pipe:0', '-filter_complex_threads', '2', '-filter_complex', graph,
             '-map', '[out]', '-frames:v', '1', '-f', 'rawvideo',
             '-pix_fmt', 'rgb24', 'pipe:1']
+    return gpu_plan.wrap(command) if gpu_plan is not None else command
