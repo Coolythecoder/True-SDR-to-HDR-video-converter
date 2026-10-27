@@ -16,20 +16,28 @@ from hdr_processing import (
 from youtube_hdr_export import (
     YOUTUBE_SUFFIX,
     YOUTUBE_CRF,
+    YOUTUBE_QUALITY_PROFILES,
     build_youtube_hdr_command,
     supports_libx265,
     validate_youtube_source,
     verify_youtube_hdr_file,
+)
+from youtube_export_analysis import (
+    ExportCancelled,
+    apply_youtube_analysis,
+    measure_audio_loudness,
+    measure_content_light,
 )
 
 class ConversionThread(QtCore.QThread):
     update_status = QtCore.pyqtSignal(str)
     log_output = QtCore.pyqtSignal(str)
 
-    def __init__(self, ffmpeg_commands, parent=None, verify_output=None):
+    def __init__(self, ffmpeg_commands, parent=None, verify_output=None, prepare_job=None):
         super().__init__(parent)
         self.ffmpeg_commands = ffmpeg_commands
         self.verify_output = verify_output
+        self.prepare_job = prepare_job
         self._process = None
         self._cancel_requested = False
 
@@ -47,6 +55,21 @@ class ConversionThread(QtCore.QThread):
                     "Status: Converting {}/{}: {}".format(number, total, name)
                 )
                 self.log_output.emit("Starting {}/{}: {}".format(number, total, name))
+                if self.prepare_job is not None:
+                    try:
+                        ffmpeg_cmd = self.prepare_job(ffmpeg_cmd, self)
+                    except ExportCancelled:
+                        self._cancel_requested = True
+                        break
+                    except Exception as exc:
+                        failed += 1
+                        self.log_output.emit(
+                            "YouTube export analysis failed for {}: {}".format(name, exc)
+                        )
+                        continue
+                    if self._cancel_requested:
+                        break
+
                 return_code = None
                 try:
                     self._process = subprocess.Popen(
@@ -262,6 +285,30 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             "metadata / 48 kHz AAC stereo / MP4 faststart. "
             "Uses CPU x265 for complete HDR10 metadata."
         )
+
+        self.youtube_quality = QtWidgets.QComboBox()
+        self.youtube_quality.addItems(list(YOUTUBE_QUALITY_PROFILES))
+        self.youtube_quality.setCurrentText("High")
+        self.youtube_quality.setToolTip(
+            "Balanced: CRF 20, medium; High: CRF 16, medium; "
+            "Maximum: CRF 12, slow. Variable bitrate, no fixed target."
+        )
+        self.youtube_analyse_light = QtWidgets.QCheckBox(
+            "Measure MaxCLL / MaxFALL from all frames (slower)"
+        )
+        self.youtube_analyse_light.setChecked(True)
+        self.youtube_analyse_light.setToolTip(
+            "Analyses every SDR source frame at full resolution before "
+            "encoding and embeds the calculated HDR content light levels."
+        )
+        self.youtube_normalize_audio = QtWidgets.QCheckBox(
+            "Normalize YouTube audio (-16 LUFS, -1.5 dBTP)"
+        )
+        self.youtube_normalize_audio.setChecked(False)
+        self.youtube_normalize_audio.setToolTip(
+            "Optional two-pass EBU R128 loudnorm, with stereo downmix. "
+            "May change loudness and dynamics; disabled by default."
+        )
         self.cancel_btn = QtWidgets.QPushButton("Cancel Conversion")
         self.cancel_btn.clicked.connect(self.cancel_conversion)
         self.status_label = QtWidgets.QLabel("Status: Waiting...")
@@ -270,10 +317,14 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(QtWidgets.QLabel("Conversion Log:"))
         layout.addWidget(self.log_output)
         layout.addWidget(self.start_btn)
+        layout.addWidget(QtWidgets.QLabel("YouTube HDR quality:"))
+        layout.addWidget(self.youtube_quality)
+        layout.addWidget(self.youtube_analyse_light)
+        layout.addWidget(self.youtube_normalize_audio)
         layout.addWidget(self.youtube_btn)
         layout.addWidget(QtWidgets.QLabel(
-            "YouTube HDR: 10-bit HEVC (CPU x265), CRF 16, AAC 48 kHz stereo. "
-            "Output is checked after encoding."
+            "YouTube HDR: 10-bit HEVC (CPU x265), AAC 48 kHz stereo; "
+            "quality is variable-bitrate. Output is verified after encoding."
         ))
         layout.addWidget(self.cancel_btn)
         layout.addWidget(self.status_label)
@@ -460,11 +511,25 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             )
 
         commands = []
+        youtube_preflights = {}
+        quality_crf, quality_preset = YOUTUBE_QUALITY_PROFILES[
+            self.youtube_quality.currentText()
+        ]
+        analyse_light = youtube_mode and self.youtube_analyse_light.isChecked()
+        normalize_audio = youtube_mode and self.youtube_normalize_audio.isChecked()
+        # Explicit HDR overrides take precedence over auto-analysis.
+        if youtube_mode and self.override_metadata.isChecked() and analyse_light:
+            analyse_light = False
+            self.log_output.appendPlainText(
+                "Notice: manual HDR light-level overrides take precedence "
+                "over automatic MaxCLL/MaxFALL analysis."
+            )
         try:
             for source, destination in jobs:
                 profile = probe_sdr_profile(ffprobe_exe, source)
                 if youtube_mode:
-                    validate_youtube_source(ffprobe_exe, source, profile)
+                    source_info = validate_youtube_source(ffprobe_exe, source, profile)
+                    youtube_preflights[source] = (profile, source_info)
                     white_nits = self.hdr_reference_nits.value()
                     max_cll, max_fall = white_nits, 0
                     if self.override_metadata.isChecked():
@@ -480,8 +545,8 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                             max_fall = int(text_fall)
                     commands.append(build_youtube_hdr_command(
                         ffmpeg_exe, source, destination, profile,
-                        white_nits=white_nits, crf=YOUTUBE_CRF,
-                        max_cll=max_cll, max_fall=max_fall,
+                        white_nits=white_nits, crf=quality_crf,
+                        max_cll=max_cll, max_fall=max_fall, preset=quality_preset,
                     ))
                 else:
                     if bit_depth == "10" and profile["primaries"] != "bt709":
@@ -499,16 +564,86 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         verify_output = None
         if youtube_mode:
             self.log_output.appendPlainText(
-                "YouTube HDR preset: CPU x265 Main 10, BT.2020/PQ, "
-                "HDR10 mastering metadata, 48 kHz AAC stereo, MP4 faststart. "
-                "Normal quality/GPU/audio selections are not used."
+                "YouTube HDR: CPU x265 Main 10 ({} / CRF {} / {}), BT.2020/PQ, "
+                "AAC stereo 48 kHz. Analyze MaxCLL/FALL: {}; normalize audio: {}. "
+                "Normal GPU/CRF/audio-passthrough controls are not used.".format(
+                    self.youtube_quality.currentText(), quality_crf, quality_preset,
+                    analyse_light, normalize_audio
+                )
             )
             verify_output = (
                 lambda output: verify_youtube_hdr_file(ffprobe_exe, output)
             )
 
+        prepare_job = None
+        if youtube_mode and (analyse_light or normalize_audio):
+            # Everything the worker needs is snapshotted on the GUI thread.
+            reference_white = self.hdr_reference_nits.value()
+
+            def prepare_job(ffmpeg_cmd, worker):
+                source = ffmpeg_cmd[ffmpeg_cmd.index("-i") + 1]
+                profile, info = youtube_preflights[source]
+
+                def register_process(process):
+                    worker._process = process
+                    if process is not None and worker._cancel_requested:
+                        process.terminate()
+
+                def cancelled():
+                    return worker._cancel_requested
+
+                light_levels = None
+                audio_stats = None
+                if analyse_light:
+                    worker.update_status.emit(
+                        "Status: Measuring MaxCLL/MaxFALL: {}".format(
+                            os.path.basename(source)
+                        )
+                    )
+                    light_levels = measure_content_light(
+                        ffmpeg_exe, source, profile,
+                        int(info["width"]), int(info["height"]),
+                        reference_white, register_process=register_process,
+                        cancelled=cancelled, progress=worker.log_output.emit,
+                    )
+                    worker.log_output.emit(
+                        "Measured HDR light levels: MaxCLL={} nits, "
+                        "MaxFALL={} nits ({} frames).".format(*light_levels)
+                    )
+
+                if normalize_audio and info.get("has_audio", False):
+                    worker.update_status.emit(
+                        "Status: Measuring audio loudness: {}".format(
+                            os.path.basename(source)
+                        )
+                    )
+                    audio_stats = measure_audio_loudness(
+                        ffmpeg_exe, source, register_process=register_process,
+                        cancelled=cancelled,
+                    )
+                    if audio_stats is None:
+                        worker.log_output.emit(
+                            "Audio is silent; normalization was skipped."
+                        )
+                    else:
+                        worker.log_output.emit(
+                            "Audio input loudness: {} LUFS, true peak {} dBTP. "
+                            "Applying two-pass -16 LUFS / -1.5 dBTP normalization.".format(
+                                audio_stats["input_i"], audio_stats["input_tp"]
+                            )
+                        )
+                elif normalize_audio:
+                    worker.log_output.emit(
+                        "Source has no audio; normalization was skipped."
+                    )
+                return apply_youtube_analysis(
+                    ffmpeg_cmd, reference_white,
+                    light_levels=light_levels, audio_measurements=audio_stats,
+                )
+
         self.conversion_thread = ConversionThread(
-            commands, self, verify_output=verify_output
+            commands, self, verify_output=verify_output,
+            prepare_job=prepare_job,
         )
         self.conversion_thread.update_status.connect(self.status_label.setText)
         self.conversion_thread.log_output.connect(self.log_output.appendPlainText)
