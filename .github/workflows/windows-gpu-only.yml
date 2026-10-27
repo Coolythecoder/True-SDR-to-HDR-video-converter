@@ -35,18 +35,22 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Build Windows folder executable
         run: python build_gpu_only.py
-      - name: Smoke-test packaged GUI and inspect CUDA bundle
+      - name: Smoke-test packaged GUI and actual bundled CUDA libraries
         shell: python
         run: |
           from pathlib import Path
-          import subprocess
+          import json, subprocess
           root = Path('dist/HDRVideoStudio-GPU')
-          assert (root / 'HDRVideoStudio-GPU.exe').is_file()
-          assert list((root / '_internal/cuda/bin').glob('nvrtc64_*.dll'))
-          assert list((root / '_internal/PyNvVideoCodec').glob('*.pyd'))
-          assert (root / '_internal/cuda/include/cuda_runtime.h').is_file()
-          subprocess.run([str(root / 'HDRVideoStudio-GPU.exe'), '--smoke-test'], check=True, timeout=90)
-          print('Packaged GUI opened and exited normally. NVIDIA execution was not tested on this CPU runner.')
+          exe = root / 'HDRVideoStudio-GPU.exe'
+          assert exe.is_file()
+          subprocess.run([str(exe), '--smoke-test'], check=True, timeout=90)
+          report = root / 'BUNDLE_VALIDATION.json'
+          result = subprocess.run([str(exe), '--bundle-check', str(report.resolve())], timeout=90)
+          if report.is_file():
+              print(report.read_text(encoding='utf-8'))
+          result.check_returncode()
+          assert json.loads(report.read_text())['success']
+          print('Packaged GUI, CuPy imports and bundled NVRTC compilation passed. GPU execution is untested.')
       - uses: actions/upload-artifact@v4
         with:
           name: HDRVideoStudio-GPU-Windows

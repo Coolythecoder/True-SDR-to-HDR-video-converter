@@ -16,7 +16,7 @@ def main():
     name = 'HDRVideoStudio-GPU'
     command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
                '--windowed', '--name', name, '--collect-all', 'cupy',
-               '--collect-all', 'cupy_backends', '--hidden-import', 'fastrlock',
+               '--collect-all', 'cupy_backends', '--collect-all', 'fastrlock',
                '--hidden-import', 'PyNvVideoCodec', '--hidden-import', 'PyNvVideoCodec.decoders',
                '--hidden-import', 'PyNvVideoCodec.decoders.SimpleDecoder',
                '--hidden-import', 'PyNvVideoCodec.decoders.ThreadedDecoder', 'gpu_only_studio.py']

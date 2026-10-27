@@ -120,6 +120,9 @@ class GPUOnlyStudio(SDRtoHDRConverter):
 
 
 def main():
+    if '--bundle-check' in sys.argv:
+        from gpu_only_bundle_check import main as check_bundle
+        return check_bundle()
     app = QtWidgets.QApplication(sys.argv)
     window = GPUOnlyStudio()
     window.show()
