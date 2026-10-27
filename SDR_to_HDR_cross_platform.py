@@ -177,7 +177,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SDR to HDR Video Converter")
-        self.setGeometry(100, 100, 600, 400)
+        self.setGeometry(100, 100, 700, 650)
         self.setAcceptDrops(True)
         self.default_style = self.styleSheet()
         self.conversion_thread = None
@@ -328,7 +328,17 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         ))
         layout.addWidget(self.cancel_btn)
         layout.addWidget(self.status_label)
-        self.setLayout(layout)
+        # Keep controls accessible on low-resolution/125%-scaled desktops.
+        # The original fixed-height window could hide the export buttons.
+        page = QtWidgets.QWidget(self)
+        page.setLayout(layout)
+        scroll = QtWidgets.QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(page)
+        root_layout = QtWidgets.QVBoxLayout()
+        root_layout.addWidget(scroll)
+        self.setLayout(root_layout)
         self.bit_depth.currentTextChanged.connect(self.update_hdr_controls)
         self.update_hdr_controls(self.bit_depth.currentText())
 
