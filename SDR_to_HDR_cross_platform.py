@@ -1,56 +1,94 @@
 import sys
 import os
 import subprocess
-import signal
-import platform
-import shutil
 import cv2
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
+from conversion_paths import find_ffmpeg, plan_conversion_jobs
 
 class ConversionThread(QtCore.QThread):
     update_status = QtCore.pyqtSignal(str)
-    conversion_finished = QtCore.pyqtSignal()
     log_output = QtCore.pyqtSignal(str)
 
-    def __init__(self, ffmpeg_cmd, parent=None):
+    def __init__(self, ffmpeg_commands, parent=None):
         super().__init__(parent)
-        self.ffmpeg_cmd = ffmpeg_cmd
+        self.ffmpeg_commands = ffmpeg_commands
         self._process = None
         self._cancel_requested = False
 
     def run(self):
+        succeeded = 0
+        failed = 0
         try:
-            self.update_status.emit("Status: Conversion in progress...")
-            self._process = subprocess.Popen(
-                self.ffmpeg_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                bufsize=1
-            )
-            for line in self._process.stdout:
-                self.log_output.emit(line.strip())
-            self._process.wait()
+            total = len(self.ffmpeg_commands)
+            for number, ffmpeg_cmd in enumerate(self.ffmpeg_commands, 1):
+                if self._cancel_requested:
+                    break
+
+                name = os.path.basename(ffmpeg_cmd[-1])
+                self.update_status.emit(
+                    "Status: Converting {}/{}: {}".format(number, total, name)
+                )
+                self.log_output.emit("Starting {}/{}: {}".format(number, total, name))
+                return_code = None
+                try:
+                    self._process = subprocess.Popen(
+                        ffmpeg_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        universal_newlines=True,
+                        bufsize=1,
+                    )
+                    # Cancellation may arrive while Popen is starting.
+                    if self._cancel_requested:
+                        self._process.terminate()
+                    if self._process.stdout:
+                        for line in self._process.stdout:
+                            self.log_output.emit(line.rstrip())
+                        self._process.stdout.close()
+                    return_code = self._process.wait()
+                except OSError as exc:
+                    self.log_output.emit("FFmpeg could not start for {}: {}".format(name, exc))
+                finally:
+                    self._process = None
+
+                if self._cancel_requested:
+                    break
+                if return_code == 0:
+                    succeeded += 1
+                else:
+                    failed += 1
+                    self.log_output.emit(
+                        "Conversion failed for {} (FFmpeg exit code {}).".format(
+                            name, return_code if return_code is not None else "unavailable"
+                        )
+                    )
+
             if self._cancel_requested:
-                self.update_status.emit("Status: Conversion canceled.")
+                self.update_status.emit(
+                    "Status: Canceled ({} succeeded, {} failed).".format(succeeded, failed)
+                )
+            elif failed:
+                self.update_status.emit(
+                    "Status: Finished with errors ({} succeeded, {} failed).".format(
+                        succeeded, failed
+                    )
+                )
             else:
-                self.update_status.emit("Status: Conversion complete.")
-        except Exception as e:
-            self.update_status.emit(f"Status: Error - {str(e)}")
-        finally:
-            self.conversion_finished.emit()
+                self.update_status.emit(
+                    "Status: Conversion complete ({} succeeded).".format(succeeded)
+                )
+        except Exception as exc:
+            self.update_status.emit("Status: Unexpected conversion error - {}".format(exc))
 
     def cancel(self):
         self._cancel_requested = True
         if self._process:
             try:
-                if platform.system() == "Windows":
-                    self._process.send_signal(signal.CTRL_BREAK_EVENT)
-                else:
-                    self._process.terminate()
-            except Exception:
+                self._process.terminate()
+            except OSError:
                 pass
+
 
 class MetadataThread(QtCore.QThread):
     metadata_ready = QtCore.pyqtSignal(str)
@@ -209,161 +247,133 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
 
     def select_input_file(self):
         if self.batch_mode.isChecked():
-            path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder")
+            path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Input Folder")
         else:
-            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Select SDR Videos", "", "Video Files (*.mp4 *.mov *.mkv)")
-            path = ';'.join(paths)
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Select SDR Video", "", "Video Files (*.mp4 *.mov *.mkv)"
+            )
         if path:
             self.input_path.setText(path)
 
     def select_output_file(self):
-        if self.batch_mode.isChecked():
-            path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        else:
-            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save HDR Video", "", "MP4 Files (*.mp4)")
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if path:
             self.output_path.setText(path)
 
+    def build_ffmpeg_command(self, ffmpeg_exe, input_path, output_path, use_gpu):
+        bit_depth = self.bit_depth.currentText()
+        quality = str(self.cq_slider.value())
+
+        if use_gpu:
+            encoder = "hevc_nvenc" if bit_depth == "10" else "h264_nvenc"
+            encoder_settings = ["-rc", "constqp", "-qp", quality]
+        else:
+            encoder = "libx265" if bit_depth == "10" else "libx264"
+            encoder_settings = ["-crf", quality]
+
+        pixel_format = (
+            "p010le" if use_gpu else "yuv420p10le"
+        ) if bit_depth == "10" else "yuv420p"
+
+        ffmpeg_cmd = [
+            ffmpeg_exe, "-y", "-i", input_path,
+            "-c:v", encoder,
+            "-pix_fmt", pixel_format,
+        ] + encoder_settings
+
+        if self.embed_metadata.isChecked() or self.generate_metadata.isChecked():
+            ffmpeg_cmd += [
+                "-color_primaries", "bt2020",
+                "-color_trc", "smpte2084",
+                "-colorspace", "bt2020nc",
+            ]
+            # x265 parameters are incompatible with hevc_nvenc.
+            # Accurate SDR-to-PQ colour processing is a separate concern.
+            if encoder == "libx265":
+                master_display = (
+                    "G(13250,34500)B(7500,3000)R(34000,16000)"
+                    "WP(15635,16450)L(10000000,1)"
+                )
+                max_cll, max_fall = "1000", "400"
+                if self.override_metadata.isChecked():
+                    cll = self.max_cll_input.text().strip()
+                    fall = self.max_fall_input.text().strip()
+                    if cll.isdigit():
+                        max_cll = cll
+                    if fall.isdigit():
+                        max_fall = fall
+                ffmpeg_cmd += [
+                    "-x265-params",
+                    "master-display={}:max-cll={},{}".format(master_display, max_cll, max_fall),
+                ]
+
+        if self.audio_passthrough.isChecked():
+            ffmpeg_cmd += ["-c:a", "copy"]
+        else:
+            ffmpeg_cmd += ["-c:a", "aac", "-b:a", "128k"]
+        ffmpeg_cmd.append(output_path)
+        return ffmpeg_cmd
+
     def start_conversion(self):
+        if self.conversion_thread and self.conversion_thread.isRunning():
+            self.status_label.setText("Status: Conversion already in progress.")
+            return
+
         input_path = self.input_path.text().strip()
         output_path = self.output_path.text().strip()
         if not input_path or not output_path:
             self.status_label.setText("Status: Please specify input and output paths.")
             return
 
-        crf_value = self.cq_slider.value()
-        tone_map_mode = self.tone_map.currentText().lower()
-        bit_depth = self.bit_depth.currentText()
-        use_gpu = self.gpu_checkbox.isChecked()
-
-        # Optional check for NVENC support
-        nvenc_supported = False
-        hevc_nvenc_supported = False
         try:
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True
+            jobs = plan_conversion_jobs(
+                input_path, output_path, self.batch_mode.isChecked()
             )
-            nvenc_supported = "h264_nvenc" in result.stdout
-            hevc_nvenc_supported = "hevc_nvenc" in result.stdout
-        except Exception:
-            self.status_label.setText("Status: FFmpeg check failed, assuming no GPU support.")
-            use_gpu = False
+        except (ValueError, OSError) as exc:
+            self.status_label.setText("Status: {}".format(exc))
+            return
+
+        ffmpeg_exe = find_ffmpeg()
+        if not ffmpeg_exe:
+            self.status_label.setText(
+                "Status: FFmpeg not found. Install FFmpeg and add it to PATH."
+            )
+            return
+
+        use_gpu = self.gpu_checkbox.isChecked()
         if use_gpu:
             try:
                 result = subprocess.run(
-                    ["ffmpeg", "-hide_banner", "-encoders"],
-                    capture_output=True, text=True
+                    [ffmpeg_exe, "-hide_banner", "-encoders"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
                 )
-                if "h264_nvenc" not in result.stdout:
-                    self.status_label.setText("Status: GPU encoder 'h264_nvenc' not found, falling back to CPU.")
-                    use_gpu = False
-            except Exception:
-                self.status_label.setText("Status: FFmpeg check failed, assuming no GPU support.")
+                available_encoders = result.stdout if result.returncode == 0 else ""
+            except (OSError, subprocess.TimeoutExpired):
+                available_encoders = ""
+
+            required_encoder = (
+                "hevc_nvenc" if self.bit_depth.currentText() == "10"
+                else "h264_nvenc"
+            )
+            if required_encoder not in available_encoders:
+                self.log_output.appendPlainText(
+                    "GPU encoder {} unavailable; falling back to CPU.".format(
+                        required_encoder
+                    )
+                )
                 use_gpu = False
 
-        ffmpeg_cmd = ["ffmpeg", "-y"]
-        use_gpu_orig = use_gpu
-        if use_gpu:
-            ffmpeg_cmd += ["-hwaccel", "cuda"]
-
-        ffmpeg_cmd += ["-i", input_path]
-
-        # HDR metadata flags will be added *after* the codec is defined to avoid parser errors
-        if self.embed_metadata.isChecked() or self.generate_metadata.isChecked():
-            master_display = "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)"
-            max_cll = "1000"
-            max_fall = "400"
-
-            if self.override_metadata.isChecked():
-                max_cll_input = self.max_cll_input.text().strip()
-                max_fall_input = self.max_fall_input.text().strip()
-                if max_cll_input.isdigit() and max_fall_input.isdigit():
-                    max_cll = max_cll_input
-                    max_fall = max_fall_input
-
-            ffmpeg_cmd += [
-                "-color_primaries", "bt2020",
-                "-color_trc", "smpte2084",
-                "-colorspace", "bt2020nc",
-                
-                
-            ]
-
-        if use_gpu:
-            if bit_depth == "10":
-                if hevc_nvenc_supported:
-                    ffmpeg_cmd += ["-c:v", "hevc_nvenc"]
-                else:
-                    self.status_label.setText("Status: 'hevc_nvenc' not found. Falling back to libx265 for HDR10.")
-                    use_gpu = False
-                    ffmpeg_cmd += ["-c:v", "libx265"]
-
-                ffmpeg_cmd += [
-                    "-c:v", "hevc_nvenc"
-                ]
-                if self.embed_metadata.isChecked() or self.generate_metadata.isChecked():
-                    master_display = "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)"
-                    max_cll = "1000"
-                    max_fall = "400"
-                    if self.override_metadata.isChecked():
-                        max_cll_input = self.max_cll_input.text().strip()
-                        max_fall_input = self.max_fall_input.text().strip()
-                        if max_cll_input.isdigit(): max_cll = max_cll_input
-                        if max_fall_input.isdigit(): max_fall = max_fall_input
-                    ffmpeg_cmd += [
-                        "-color_primaries", "bt2020",
-                        "-color_trc", "smpte2084",
-                        "-colorspace", "bt2020nc",
-                        "-x265-params", f"master-display={master_display}:max-cll={max_cll},{max_fall}"
-                    ]
-                ffmpeg_cmd += [
-                    "-pix_fmt", "yuv420p10le",
-                    "-rc", "constqp", "-qp", str(crf_value)
-                ]
-            else:
-                ffmpeg_cmd += [
-                    "-c:v", "h264_nvenc",
-                    "-pix_fmt", "yuv420p",
-                    "-rc", "constqp", "-qp", str(crf_value)
-                ]
-        else:
-            ffmpeg_cmd += [
-                "-c:v", "libx264",  # fallback for unsupported GPUs
-                "-crf", str(crf_value)
-            ]
-            if self.embed_metadata.isChecked() or self.generate_metadata.isChecked():
-                if "-c:v" in ffmpeg_cmd and ("libx265" in ffmpeg_cmd):
-                    master_display = "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)"
-                    max_cll = "1000"
-                    max_fall = "400"
-                    if self.override_metadata.isChecked():
-                        max_cll_input = self.max_cll_input.text().strip()
-                        max_fall_input = self.max_fall_input.text().strip()
-                        if max_cll_input.isdigit(): max_cll = max_cll_input
-                        if max_fall_input.isdigit(): max_fall = max_fall_input
-                    ffmpeg_cmd += [
-                        "-color_primaries", "bt2020",
-                        "-color_trc", "smpte2084",
-                        "-colorspace", "bt2020nc",
-                        "-x265-params", f"master-display={master_display}:max-cll={max_cll},{max_fall}"
-                    ]
-                else:
-                    self.status_label.setText("Warning: HDR metadata not applied. Use 10-bit + HEVC encoder.")
-            ffmpeg_cmd += [
-                "-pix_fmt", "yuv420p10le" if bit_depth == "10" else "yuv420p"
-            ]
-
-        if self.audio_passthrough.isChecked():
-            ffmpeg_cmd += ["-c:a", "copy"]
-        else:
-            ffmpeg_cmd += ["-c:a", "aac", "-b:a", "128k"]
-        ffmpeg_cmd += [output_path]
-
-        self.conversion_thread = ConversionThread(ffmpeg_cmd)
+        commands = [
+            self.build_ffmpeg_command(ffmpeg_exe, source, destination, use_gpu)
+            for source, destination in jobs
+        ]
+        self.conversion_thread = ConversionThread(commands, self)
         self.conversion_thread.update_status.connect(self.status_label.setText)
-        self.conversion_thread.conversion_finished.connect(self.on_conversion_finished)
         self.conversion_thread.log_output.connect(self.log_output.appendPlainText)
+        self.conversion_thread.finished.connect(self.on_conversion_finished)
+        self.start_btn.setEnabled(False)
         self.conversion_thread.start()
 
     def cancel_conversion(self):
@@ -378,6 +388,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
 
     def on_conversion_finished(self):
         self.conversion_thread = None
+        self.start_btn.setEnabled(True)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
