@@ -13,14 +13,23 @@ from hdr_processing import (
     probe_sdr_profile,
     x265_sdr_mastering_params,
 )
+from youtube_hdr_export import (
+    YOUTUBE_SUFFIX,
+    YOUTUBE_CRF,
+    build_youtube_hdr_command,
+    supports_libx265,
+    validate_youtube_source,
+    verify_youtube_hdr_file,
+)
 
 class ConversionThread(QtCore.QThread):
     update_status = QtCore.pyqtSignal(str)
     log_output = QtCore.pyqtSignal(str)
 
-    def __init__(self, ffmpeg_commands, parent=None):
+    def __init__(self, ffmpeg_commands, parent=None, verify_output=None):
         super().__init__(parent)
         self.ffmpeg_commands = ffmpeg_commands
+        self.verify_output = verify_output
         self._process = None
         self._cancel_requested = False
 
@@ -62,15 +71,32 @@ class ConversionThread(QtCore.QThread):
 
                 if self._cancel_requested:
                     break
-                if return_code == 0:
+                verification_failed = False
+                if return_code == 0 and self.verify_output is not None:
+                    try:
+                        self.verify_output(ffmpeg_cmd[-1])
+                        self.log_output.emit(
+                            "Verified YouTube HDR output: {}".format(name)
+                        )
+                    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                        verification_failed = True
+                        self.log_output.emit(
+                            "YouTube HDR verification failed for {}: {}".format(name, exc)
+                        )
+                if return_code == 0 and not verification_failed:
                     succeeded += 1
                 else:
                     failed += 1
-                    self.log_output.emit(
-                        "Conversion failed for {} (FFmpeg exit code {}).".format(
-                            name, return_code if return_code is not None else "unavailable"
+                    if verification_failed:
+                        self.log_output.emit(
+                            "{} was encoded but is NOT verified YouTube HDR-ready.".format(name)
                         )
-                    )
+                    else:
+                        self.log_output.emit(
+                            "Conversion failed for {} (FFmpeg exit code {}).".format(
+                                name, return_code if return_code is not None else "unavailable"
+                            )
+                        )
 
             if self._cancel_requested:
                 self.update_status.emit(
@@ -229,6 +255,13 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
 
         self.start_btn = QtWidgets.QPushButton("Start Conversion")
         self.start_btn.clicked.connect(self.start_conversion)
+        self.youtube_btn = QtWidgets.QPushButton("Export YouTube HDR MP4")
+        self.youtube_btn.clicked.connect(self.start_youtube_export)
+        self.youtube_btn.setToolTip(
+            "YouTube upload preset: HEVC Main 10 / PQ BT.2020 / static HDR10 "
+            "metadata / 48 kHz AAC stereo / MP4 faststart. "
+            "Uses CPU x265 for complete HDR10 metadata."
+        )
         self.cancel_btn = QtWidgets.QPushButton("Cancel Conversion")
         self.cancel_btn.clicked.connect(self.cancel_conversion)
         self.status_label = QtWidgets.QLabel("Status: Waiting...")
@@ -237,6 +270,11 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(QtWidgets.QLabel("Conversion Log:"))
         layout.addWidget(self.log_output)
         layout.addWidget(self.start_btn)
+        layout.addWidget(self.youtube_btn)
+        layout.addWidget(QtWidgets.QLabel(
+            "YouTube HDR: 10-bit HEVC (CPU x265), CRF 16, AAC 48 kHz stereo. "
+            "Output is checked after encoding."
+        ))
         layout.addWidget(self.cancel_btn)
         layout.addWidget(self.status_label)
         self.setLayout(layout)
@@ -332,6 +370,12 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         return ffmpeg_cmd
 
     def start_conversion(self):
+        self._start_conversion(youtube_mode=False)
+
+    def start_youtube_export(self):
+        self._start_conversion(youtube_mode=True)
+
+    def _start_conversion(self, youtube_mode=False):
         if self.conversion_thread and self.conversion_thread.isRunning():
             self.status_label.setText("Status: Conversion already in progress.")
             return
@@ -342,11 +386,14 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             self.status_label.setText("Status: Please specify input and output paths.")
             return
 
-        bit_depth = self.bit_depth.currentText()
+        bit_depth = "10" if youtube_mode else self.bit_depth.currentText()
+        suffix = YOUTUBE_SUFFIX if youtube_mode else (
+            "_HDR" if bit_depth == "10" else "_SDR"
+        )
         try:
             jobs = plan_conversion_jobs(
                 input_path, output_path, self.batch_mode.isChecked(),
-                output_suffix="_HDR" if bit_depth == "10" else "_SDR"
+                output_suffix=suffix,
             )
         except (ValueError, OSError) as exc:
             self.status_label.setText("Status: {}".format(exc))
@@ -366,12 +413,23 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             return
 
         ffprobe_exe = find_ffprobe(ffmpeg_exe)
-        if not ffprobe_exe:
+        if youtube_mode:
+            if not ffprobe_exe:
+                self.status_label.setText(
+                    "Status: YouTube HDR requires FFprobe for input/output verification."
+                )
+                return
+            if not supports_libx265(ffmpeg_exe):
+                self.status_label.setText(
+                    "Status: YouTube HDR requires an FFmpeg build with libx265."
+                )
+                return
+        elif not ffprobe_exe:
             self.log_output.appendPlainText(
                 "Warning: FFprobe not found. Assuming SDR BT.709 limited-range source."
             )
 
-        use_gpu = self.gpu_checkbox.isChecked()
+        use_gpu = False if youtube_mode else self.gpu_checkbox.isChecked()
         if use_gpu:
             try:
                 result = subprocess.run(
@@ -405,23 +463,58 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         try:
             for source, destination in jobs:
                 profile = probe_sdr_profile(ffprobe_exe, source)
-                if bit_depth == "10" and profile["primaries"] != "bt709":
-                    self.log_output.appendPlainText(
-                        "Notice: {} has non-BT.709 primaries; static mastering-display "
-                        "metadata will be omitted.".format(os.path.basename(source))
-                    )
-                commands.append(self.build_ffmpeg_command(
-                    ffmpeg_exe, source, destination, use_gpu, profile
-                ))
+                if youtube_mode:
+                    validate_youtube_source(ffprobe_exe, source, profile)
+                    white_nits = self.hdr_reference_nits.value()
+                    max_cll, max_fall = white_nits, 0
+                    if self.override_metadata.isChecked():
+                        text_cll = self.max_cll_input.text().strip()
+                        text_fall = self.max_fall_input.text().strip()
+                        if text_cll:
+                            if not text_cll.isdigit():
+                                raise ValueError("MaxCLL must be a positive integer.")
+                            max_cll = int(text_cll)
+                        if text_fall:
+                            if not text_fall.isdigit():
+                                raise ValueError("MaxFALL must be a nonnegative integer.")
+                            max_fall = int(text_fall)
+                    commands.append(build_youtube_hdr_command(
+                        ffmpeg_exe, source, destination, profile,
+                        white_nits=white_nits, crf=YOUTUBE_CRF,
+                        max_cll=max_cll, max_fall=max_fall,
+                    ))
+                else:
+                    if bit_depth == "10" and profile["primaries"] != "bt709":
+                        self.log_output.appendPlainText(
+                            "Notice: {} has non-BT.709 primaries; static mastering-display "
+                            "metadata will be omitted.".format(os.path.basename(source))
+                        )
+                    commands.append(self.build_ffmpeg_command(
+                        ffmpeg_exe, source, destination, use_gpu, profile
+                    ))
         except ValueError as exc:
             self.status_label.setText("Status: {}".format(exc))
             return
 
-        self.conversion_thread = ConversionThread(commands, self)
+        verify_output = None
+        if youtube_mode:
+            self.log_output.appendPlainText(
+                "YouTube HDR preset: CPU x265 Main 10, BT.2020/PQ, "
+                "HDR10 mastering metadata, 48 kHz AAC stereo, MP4 faststart. "
+                "Normal quality/GPU/audio selections are not used."
+            )
+            verify_output = (
+                lambda output: verify_youtube_hdr_file(ffprobe_exe, output)
+            )
+
+        self.conversion_thread = ConversionThread(
+            commands, self, verify_output=verify_output
+        )
         self.conversion_thread.update_status.connect(self.status_label.setText)
         self.conversion_thread.log_output.connect(self.log_output.appendPlainText)
         self.conversion_thread.finished.connect(self.on_conversion_finished)
         self.start_btn.setEnabled(False)
+        self.youtube_btn.setEnabled(False)
         self.conversion_thread.start()
 
     def cancel_conversion(self):
@@ -437,6 +530,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
     def on_conversion_finished(self):
         self.conversion_thread = None
         self.start_btn.setEnabled(True)
+        self.youtube_btn.setEnabled(True)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)

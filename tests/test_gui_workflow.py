@@ -162,6 +162,61 @@ class GuiWorkflowTests(unittest.TestCase):
 
 
 
+    def test_youtube_button_forces_metadata_complete_cpu_export(self):
+        video = self.root / "video.mp4"
+        video.write_bytes(b"fake footage")
+        self.widget.input_path.setText(str(video))
+        self.widget.output_path.setText(str(self.root))
+        self.widget.bit_depth.setCurrentText("8")
+        self.widget.gpu_checkbox.setChecked(True)
+        self.widget.audio_passthrough.setChecked(True)
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value="ffprobe"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "supports_libx265", return_value=True), \
+             mock.patch.object(converter_module, "probe_sdr_profile",
+                               return_value=converter_module.DEFAULT_SDR_PROFILE), \
+             mock.patch.object(converter_module, "validate_youtube_source"), \
+             mock.patch.object(converter_module.ConversionThread, "start"):
+            self.widget.youtube_btn.click()
+        self.assertIsNotNone(self.widget.conversion_thread)
+        cmd = self.widget.conversion_thread.ffmpeg_commands[0]
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "libx265")
+        self.assertEqual(cmd[cmd.index("-profile:v") + 1], "main10")
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+        self.assertIn("-x265-params", cmd)
+        self.assertTrue(cmd[-1].endswith("video_YouTube_HDR.mp4"))
+        self.assertIsNotNone(self.widget.conversion_thread.verify_output)
+        self.assertFalse(self.widget.start_btn.isEnabled())
+        self.assertFalse(self.widget.youtube_btn.isEnabled())
+
+    def test_youtube_button_requires_ffprobe(self):
+        video = self.root / "video.mp4"
+        video.write_bytes(b"fake footage")
+        self.widget.input_path.setText(str(video))
+        self.widget.output_path.setText(str(self.root))
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value=None):
+            self.widget.start_youtube_export()
+        self.assertIsNone(self.widget.conversion_thread)
+        self.assertIn("FFprobe", self.widget.status_label.text())
+
+    def test_youtube_button_fails_without_libx265(self):
+        video = self.root / "video.mp4"
+        video.write_bytes(b"fake footage")
+        self.widget.input_path.setText(str(video))
+        self.widget.output_path.setText(str(self.root))
+        with mock.patch.object(converter_module, "find_ffmpeg", return_value="ffmpeg"), \
+             mock.patch.object(converter_module, "has_zscale", return_value=True), \
+             mock.patch.object(converter_module, "find_ffprobe", return_value="ffprobe"), \
+             mock.patch.object(converter_module, "supports_libx265", return_value=False):
+            self.widget.start_youtube_export()
+        self.assertIsNone(self.widget.conversion_thread)
+        self.assertIn("libx265", self.widget.status_label.text())
+
+
+
 @unittest.skipIf(converter_module is None, "Requires PyQt5 and OpenCV")
 class WorkerTests(unittest.TestCase):
     @staticmethod
@@ -188,6 +243,37 @@ class WorkerTests(unittest.TestCase):
         with mock.patch.object(converter_module.subprocess, "Popen", side_effect=[self.process(1), self.process(0)]):
             worker.run()
         self.assertIn("1 succeeded, 1 failed", statuses[-1])
+
+    def test_youtube_validation_failure_is_reported_as_failed_job(self):
+        worker = converter_module.ConversionThread(
+            [["ffmpeg", "-i", "video.mp4", "video_YouTube_HDR.mp4"]],
+            verify_output=mock.Mock(side_effect=ValueError("PQ metadata missing")),
+        )
+        statuses = []
+        logs = []
+        worker.update_status.connect(statuses.append)
+        worker.log_output.connect(logs.append)
+        with mock.patch.object(
+            converter_module.subprocess, "Popen", return_value=self.process(0)
+        ):
+            worker.run()
+        self.assertIn("1 failed", statuses[-1])
+        self.assertTrue(any("PQ metadata missing" in msg for msg in logs))
+
+    def test_successful_post_encode_verification_is_reported(self):
+        verify = mock.Mock(return_value=True)
+        worker = converter_module.ConversionThread(
+            [["ffmpeg", "-i", "video.mp4", "video_YouTube_HDR.mp4"]],
+            verify_output=verify,
+        )
+        statuses = []
+        worker.update_status.connect(statuses.append)
+        with mock.patch.object(
+            converter_module.subprocess, "Popen", return_value=self.process(0)
+        ):
+            worker.run()
+        self.assertIn("1 succeeded", statuses[-1])
+        verify.assert_called_once_with("video_YouTube_HDR.mp4")
 
     def test_cancel_terminates_process(self):
         worker = converter_module.ConversionThread([["ffmpeg", "-i", "a.mp4", "a_HDR.mp4"]])
