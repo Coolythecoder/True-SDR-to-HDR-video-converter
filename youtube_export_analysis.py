@@ -30,7 +30,7 @@ def _check_cancel(cancelled):
 
 
 def linear_frame_light_levels(frame, white_nits):
-    """Calculate MaxCLL and frame-average luminance in nits from GBR planar floats.
+    """Calculate peak and frame-average luminance in nits from GBR planar floats.
 
     FFmpeg gbrpf32le stores planes in G, B, R order, not R, G, B.
     Rec.2020 linear RGB -> CIE luminance: Y=0.2627 R + 0.6780 G + 0.0593 B.
@@ -65,9 +65,9 @@ def _read_frame(pipe, frame_bytes, cancelled=None):
 
 def measure_content_light(
     ffmpeg_exe, input_path, profile, width, height, white_nits,
-    register_process=None, cancelled=None, progress=None
+    register_process=None, cancelled=None, progress=None, grade=None
 ):
-    """Return (MaxCLL, MaxFALL, frame_count) from the complete SDR source.
+    """Return (MaxCLL, MaxFALL, frame_count) after the optional creative grade.
 
     This is a pre-encode prediction in the same linear colour pipeline as the
     exported PQ video. Encoding may change extreme pixels slightly.
@@ -81,7 +81,7 @@ def measure_content_light(
         ffmpeg_exe, "-hide_banner", "-nostdin", "-nostats", "-v", "error",
         "-noautorotate", "-i", str(input_path),
         "-map", "0:v:0", "-an", "-sn", "-dn",
-        "-vf", build_sdr_to_linear_filter(profile),
+        "-vf", build_sdr_to_linear_filter(profile, grade=grade, white_nits=white_nits),
         "-pix_fmt", "gbrpf32le", "-f", "rawvideo", "pipe:1",
     ]
     _check_cancel(cancelled)
@@ -194,9 +194,8 @@ def measure_audio_loudness(
         except (ValueError, TypeError) as exc:
             raise ValueError("Invalid loudnorm JSON: {}".format(exc))
         if not math.isfinite(float(measurements["input_i"])):
-            # For genuine silence, adding gain is meaningless.
             return None
-        _loudnorm_filter(measurements)  # Validate all measured properties.
+        _loudnorm_filter(measurements)
         return measurements
     finally:
         if process.poll() is None:
@@ -213,15 +212,15 @@ def measure_audio_loudness(
 
 
 def apply_youtube_analysis(
-    command, white_nits, light_levels=None, audio_measurements=None
+    command, white_nits, light_levels=None, audio_measurements=None, grade=None
 ):
-    """Replace the x265 metadata and optionally add measured loudnorm filter."""
+    """Replace x265 metadata after grading; NVENC has no x265-specific SEI path."""
     output = list(command)
-    if light_levels is not None:
+    if light_levels is not None and "-x265-params" in output:
         max_cll, max_fall = light_levels[:2]
         position = output.index("-x265-params") + 1
         output[position] = x265_sdr_mastering_params(
-            white_nits, max_cll, max_fall
+            white_nits, max_cll, max_fall, grade=grade
         )
     if audio_measurements is not None:
         audio_position = output.index("-c:a")
