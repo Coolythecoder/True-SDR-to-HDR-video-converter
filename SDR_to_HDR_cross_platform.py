@@ -5,6 +5,14 @@ import cv2
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
 from conversion_paths import find_ffmpeg, plan_conversion_jobs
+from hdr_processing import (
+    DEFAULT_SDR_PROFILE,
+    build_sdr_to_pq_filter,
+    find_ffprobe,
+    has_zscale,
+    probe_sdr_profile,
+    x265_sdr_mastering_params,
+)
 
 class ConversionThread(QtCore.QThread):
     update_status = QtCore.pyqtSignal(str)
@@ -127,20 +135,20 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.metadata_thread = None
         self.init_ui()
 
-    def update_tone_controls(self, text):
-        is_linear = text.lower() == "linear"
-        is_pq = text.lower() == "pq"
-        is_log = text.lower() == "log"
-
-        self.linear_scale_label.setVisible(is_linear)
-        self.linear_scale_input.setVisible(is_linear)
-        self.pq_gamma_label.setVisible(is_pq)
-        self.pq_gamma_input.setVisible(is_pq)
-        self.log_factor_label.setVisible(is_log)
-        self.log_factor_input.setVisible(is_log)
+    def update_hdr_controls(self, depth):
+        is_hdr = depth == "10"
+        self.hdr_reference_nits.setEnabled(is_hdr)
+        self.embed_metadata.setEnabled(is_hdr)
+        self.generate_metadata.setEnabled(is_hdr)
+        self.override_metadata.setEnabled(is_hdr)
+        self.color_processing_label.setText(
+            "10-bit HDR: BT.709 SDR to BT.2020 PQ (automatic)"
+            if is_hdr else "8-bit output: SDR only; no HDR metadata"
+        )
+        self.toggle_override_fields()
 
     def toggle_override_fields(self):
-        enabled = self.override_metadata.isChecked()
+        enabled = self.bit_depth.currentText() == "10" and self.override_metadata.isChecked()
         self.max_cll_input.setEnabled(enabled)
         self.max_fall_input.setEnabled(enabled)
 
@@ -158,44 +166,27 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(self.output_btn)
         layout.addWidget(self.output_path)
 
-        self.tone_map_label = QtWidgets.QLabel("Tone Mapping Type:")
-        self.tone_map = QtWidgets.QComboBox()
-        self.tone_map.addItems(["Linear", "Log", "PQ"])
-        layout.addWidget(self.tone_map_label)
-        layout.addWidget(self.tone_map)
-
-        self.linear_scale_label = QtWidgets.QLabel("Linear Scale Factor:")
-        self.linear_scale_input = QtWidgets.QDoubleSpinBox()
-        self.linear_scale_input.setRange(0.1, 5.0)
-        self.linear_scale_input.setValue(1.5)
-        layout.addWidget(self.linear_scale_label)
-        layout.addWidget(self.linear_scale_input)
-
-        self.pq_gamma_label = QtWidgets.QLabel("PQ Gamma Exponent:")
-        self.pq_gamma_input = QtWidgets.QDoubleSpinBox()
-        self.pq_gamma_input.setRange(0.1, 5.0)
-        self.pq_gamma_input.setValue(2.2)
-        layout.addWidget(self.pq_gamma_label)
-        layout.addWidget(self.pq_gamma_input)
-
-        self.log_factor_label = QtWidgets.QLabel("Log Compression Factor:")
-        self.log_factor_input = QtWidgets.QDoubleSpinBox()
-        self.log_factor_input.setRange(0.1, 10.0)
-        self.log_factor_input.setValue(1.0)
-        layout.addWidget(self.log_factor_label)
-        layout.addWidget(self.log_factor_input)
-
-        self.tone_map.currentTextChanged.connect(self.update_tone_controls)
-        self.update_tone_controls(self.tone_map.currentText())
+        self.hdr_reference_label = QtWidgets.QLabel("HDR Reference White (nits):")
+        self.hdr_reference_nits = QtWidgets.QSpinBox()
+        self.hdr_reference_nits.setRange(80, 400)
+        self.hdr_reference_nits.setValue(200)
+        self.hdr_reference_nits.setToolTip(
+            "SDR 100-nit diffuse white maps to this PQ luminance. "
+            "200 nits follows MovieLabs BT.709-to-HDR10 guidance."
+        )
+        layout.addWidget(self.hdr_reference_label)
+        layout.addWidget(self.hdr_reference_nits)
 
         self.bit_depth_label = QtWidgets.QLabel("Output Bit Depth:")
         self.bit_depth = QtWidgets.QComboBox()
-        self.bit_depth.addItems(["8", "10"])
+        self.bit_depth.addItems(["10", "8"])
+        self.bit_depth.setToolTip("10-bit output is HDR PQ; 8-bit output stays SDR.")
         layout.addWidget(self.bit_depth_label)
         layout.addWidget(self.bit_depth)
 
-        self.color_convert = QtWidgets.QCheckBox("Convert BT.709 to BT.2020")
-        self.embed_metadata = QtWidgets.QCheckBox("Embed HDR10 Metadata")
+        self.color_processing_label = QtWidgets.QLabel()
+        self.embed_metadata = QtWidgets.QCheckBox("Embed HDR10 mastering metadata (x265)")
+        self.embed_metadata.setChecked(True)
         self.generate_metadata = QtWidgets.QCheckBox("Generate Static HDR Metadata")
         self.override_metadata = QtWidgets.QCheckBox("Override HDR Metadata")
         self.max_cll_input = QtWidgets.QLineEdit()
@@ -208,7 +199,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.gpu_checkbox = QtWidgets.QCheckBox("Use GPU Acceleration (NVENC)")
         self.audio_passthrough = QtWidgets.QCheckBox("Enable Audio Passthrough")
         layout.addWidget(self.audio_passthrough)
-        layout.addWidget(self.color_convert)
+        layout.addWidget(self.color_processing_label)
         layout.addWidget(self.embed_metadata)
         layout.addWidget(self.generate_metadata)
         layout.addWidget(self.override_metadata)
@@ -244,6 +235,8 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(self.cancel_btn)
         layout.addWidget(self.status_label)
         self.setLayout(layout)
+        self.bit_depth.currentTextChanged.connect(self.update_hdr_controls)
+        self.update_hdr_controls(self.bit_depth.currentText())
 
     def select_input_file(self):
         if self.batch_mode.isChecked():
@@ -260,9 +253,12 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         if path:
             self.output_path.setText(path)
 
-    def build_ffmpeg_command(self, ffmpeg_exe, input_path, output_path, use_gpu):
+    def build_ffmpeg_command(
+        self, ffmpeg_exe, input_path, output_path, use_gpu, source_profile=None
+    ):
         bit_depth = self.bit_depth.currentText()
         quality = str(self.cq_slider.value())
+        source_profile = source_profile or DEFAULT_SDR_PROFILE
 
         if use_gpu:
             encoder = "hevc_nvenc" if bit_depth == "10" else "h264_nvenc"
@@ -275,37 +271,53 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             "p010le" if use_gpu else "yuv420p10le"
         ) if bit_depth == "10" else "yuv420p"
 
-        ffmpeg_cmd = [
-            ffmpeg_exe, "-y", "-i", input_path,
+        ffmpeg_cmd = [ffmpeg_exe, "-y", "-i", input_path]
+        if bit_depth == "10":
+            # IMPORTANT: Do not tag SDR YUV as PQ. Actually transform the
+            # pixel values, through display-linear BT.2020, before encoding.
+            ffmpeg_cmd += [
+                "-vf",
+                build_sdr_to_pq_filter(
+                    source_profile, self.hdr_reference_nits.value(), pixel_format
+                ),
+                "-color_primaries", "bt2020",
+                "-color_trc", "smpte2084",
+                "-colorspace", "bt2020nc",
+                "-color_range", "tv",
+            ]
+
+        ffmpeg_cmd += [
             "-c:v", encoder,
             "-pix_fmt", pixel_format,
         ] + encoder_settings
 
-        if self.embed_metadata.isChecked() or self.generate_metadata.isChecked():
+        # Static ST 2086 + MaxCLL/MaxFALL SEI in x265 only. NVENC still
+        # receives valid PQ/BT.2020 signalling, but not invented ST 2086.
+        if (
+            bit_depth == "10" and encoder == "libx265"
+            and source_profile["primaries"] == "bt709"
+            and (self.embed_metadata.isChecked() or self.generate_metadata.isChecked())
+        ):
+            max_cll = self.hdr_reference_nits.value()
+            max_fall = 0  # "unknown", not an estimated per-frame average
+            if self.override_metadata.isChecked():
+                cll_text = self.max_cll_input.text().strip()
+                fall_text = self.max_fall_input.text().strip()
+                if cll_text:
+                    if not cll_text.isdigit():
+                        raise ValueError("MaxCLL must be a positive integer.")
+                    max_cll = int(cll_text)
+                if fall_text:
+                    if not fall_text.isdigit():
+                        raise ValueError("MaxFALL must be a nonnegative integer.")
+                    max_fall = int(fall_text)
+
             ffmpeg_cmd += [
-                "-color_primaries", "bt2020",
-                "-color_trc", "smpte2084",
-                "-colorspace", "bt2020nc",
+                "-x265-params",
+                x265_sdr_mastering_params(
+                    self.hdr_reference_nits.value(), max_cll, max_fall
+                ),
             ]
-            # x265 parameters are incompatible with hevc_nvenc.
-            # Accurate SDR-to-PQ colour processing is a separate concern.
-            if encoder == "libx265":
-                master_display = (
-                    "G(13250,34500)B(7500,3000)R(34000,16000)"
-                    "WP(15635,16450)L(10000000,1)"
-                )
-                max_cll, max_fall = "1000", "400"
-                if self.override_metadata.isChecked():
-                    cll = self.max_cll_input.text().strip()
-                    fall = self.max_fall_input.text().strip()
-                    if cll.isdigit():
-                        max_cll = cll
-                    if fall.isdigit():
-                        max_fall = fall
-                ffmpeg_cmd += [
-                    "-x265-params",
-                    "master-display={}:max-cll={},{}".format(master_display, max_cll, max_fall),
-                ]
 
         if self.audio_passthrough.isChecked():
             ffmpeg_cmd += ["-c:a", "copy"]
@@ -325,9 +337,11 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             self.status_label.setText("Status: Please specify input and output paths.")
             return
 
+        bit_depth = self.bit_depth.currentText()
         try:
             jobs = plan_conversion_jobs(
-                input_path, output_path, self.batch_mode.isChecked()
+                input_path, output_path, self.batch_mode.isChecked(),
+                output_suffix="_HDR" if bit_depth == "10" else "_SDR"
             )
         except (ValueError, OSError) as exc:
             self.status_label.setText("Status: {}".format(exc))
@@ -339,23 +353,32 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 "Status: FFmpeg not found. Install FFmpeg and add it to PATH."
             )
             return
+        if bit_depth == "10" and not has_zscale(ffmpeg_exe):
+            self.status_label.setText(
+                "Status: FFmpeg lacks the zscale/zimg colour filter. "
+                "Install a full FFmpeg build before exporting HDR."
+            )
+            return
+
+        ffprobe_exe = find_ffprobe(ffmpeg_exe)
+        if not ffprobe_exe:
+            self.log_output.appendPlainText(
+                "Warning: FFprobe not found. Assuming SDR BT.709 limited-range source."
+            )
 
         use_gpu = self.gpu_checkbox.isChecked()
         if use_gpu:
             try:
                 result = subprocess.run(
                     [ffmpeg_exe, "-hide_banner", "-encoders"],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
+                    capture_output=True, text=True, timeout=15,
                 )
                 available_encoders = result.stdout if result.returncode == 0 else ""
             except (OSError, subprocess.TimeoutExpired):
                 available_encoders = ""
 
             required_encoder = (
-                "hevc_nvenc" if self.bit_depth.currentText() == "10"
-                else "h264_nvenc"
+                "hevc_nvenc" if bit_depth == "10" else "h264_nvenc"
             )
             if required_encoder not in available_encoders:
                 self.log_output.appendPlainText(
@@ -365,10 +388,30 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 )
                 use_gpu = False
 
-        commands = [
-            self.build_ffmpeg_command(ffmpeg_exe, source, destination, use_gpu)
-            for source, destination in jobs
-        ]
+        if bit_depth == "10" and use_gpu and (
+            self.embed_metadata.isChecked() or self.generate_metadata.isChecked()
+        ):
+            self.log_output.appendPlainText(
+                "Notice: NVENC produces PQ/BT.2020 HDR, but this path does not "
+                "embed x265 mastering-display SEI. Select CPU/x265 for ST 2086."
+            )
+
+        commands = []
+        try:
+            for source, destination in jobs:
+                profile = probe_sdr_profile(ffprobe_exe, source)
+                if bit_depth == "10" and profile["primaries"] != "bt709":
+                    self.log_output.appendPlainText(
+                        "Notice: {} has non-BT.709 primaries; static mastering-display "
+                        "metadata will be omitted.".format(os.path.basename(source))
+                    )
+                commands.append(self.build_ffmpeg_command(
+                    ffmpeg_exe, source, destination, use_gpu, profile
+                ))
+        except ValueError as exc:
+            self.status_label.setText("Status: {}".format(exc))
+            return
+
         self.conversion_thread = ConversionThread(commands, self)
         self.conversion_thread.update_status.connect(self.status_label.setText)
         self.conversion_thread.log_output.connect(self.log_output.appendPlainText)
