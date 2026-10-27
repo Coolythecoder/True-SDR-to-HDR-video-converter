@@ -19,7 +19,13 @@ def main():
     if len(dlls) != 1:
         raise RuntimeError('Cannot identify primary NVRTC runtime: ' + repr(dlls))
     handles = [os.add_dll_directory(str(dlls[0].parent))]
-    print('Primary NVRTC:', dlls[0])
+    os.environ['PATH'] = str(dlls[0].parent) + os.pathsep + os.environ.get('PATH', '')
+    builtins = [Path(dist.locate_file(p)) for p in dist.files or []
+                if p.name.startswith('nvrtc-builtins64_') and p.suffix.lower() == '.dll' and '.alt.' not in p.name]
+    if len(builtins) != 1:
+        raise RuntimeError('Cannot identify NVRTC builtins: ' + repr(builtins))
+    builtins_handle = C.WinDLL(str(builtins[0]))
+    print('Primary NVRTC:', dlls[0], 'builtins:', builtins[0])
     nvrtc = C.WinDLL(str(dlls[0]))
     nvrtc.nvrtcCreateProgram.argtypes = [C.POINTER(C.c_void_p), C.c_char_p, C.c_char_p,
                                         C.c_int, C.c_void_p, C.c_void_p]
