@@ -25,6 +25,9 @@ class GuiWorkflowTests(unittest.TestCase):
 
     def setUp(self):
         self.widget = converter_module.SDRtoHDRConverter()
+        # Baseline CPU recipe contracts; GPU defaults/fallbacks are tested separately.
+        self.widget.processing_gpu.setChecked(False)
+        self.widget.hardware_decode.setChecked(False)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
