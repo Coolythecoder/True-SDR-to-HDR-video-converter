@@ -128,7 +128,7 @@ class YouTubeVerificationTests(unittest.TestCase):
             _box(b"mdat", b"a" * 200)
         )
         self.probe_data = {"streams": [{
-            "codec_type": "video", "codec_name": "hevc",
+            "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1",
             "profile": "Main 10", "pix_fmt": "yuv420p10le",
             "color_primaries": "bt2020", "color_transfer": "smpte2084",
             "color_space": "bt2020nc", "color_range": "tv",
@@ -177,6 +177,12 @@ class YouTubeVerificationTests(unittest.TestCase):
         with mock.patch("youtube_hdr_export._probe", return_value=self.probe_data), \
              mock.patch("youtube_hdr_export.subprocess.run", return_value=proc):
             with self.assertRaisesRegex(ValueError, "missing HEVC HDR10 SEI"):
+                verify_youtube_hdr_file("ffprobe", str(self.video))
+
+    def test_verification_rejects_wrong_hevc_sample_entry(self):
+        self.probe_data["streams"][0]["codec_tag_string"] = "hev1"
+        with mock.patch("youtube_hdr_export._probe", return_value=self.probe_data):
+            with self.assertRaisesRegex(ValueError, "codec_tag_string"):
                 verify_youtube_hdr_file("ffprobe", str(self.video))
 
     def test_verification_fails_incorrect_colour_transfer(self):
