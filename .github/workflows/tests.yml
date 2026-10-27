@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: python -m pip install PyQt5 numpy opencv-python-headless
+      - name: Compile Python sources
+        run: python -m compileall -q SDR_to_HDR_cross_platform.py conversion_paths.py tests
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
