@@ -6,6 +6,7 @@ on:
 
 jobs:
   unit-tests:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -13,6 +14,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       QT_QPA_PLATFORM: offscreen
+      HDR_SCREENSHOT_DIR: ui_artifacts
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -29,10 +31,19 @@ jobs:
           fi
           ffmpeg -hide_banner -filters | grep zscale
           ffmpeg -hide_banner -filters | grep geq
+          ffmpeg -hide_banner -filters | grep tonemap
           ffmpeg -hide_banner -encoders | grep libx265
       - name: Compile Python sources
-        run: python -m compileall -q SDR_to_HDR_cross_platform.py conversion_paths.py hdr_processing.py youtube_hdr_export.py youtube_export_analysis.py creative_hdr.py creative_hdr_pipeline.py creative_hdr_ui.py tests
+        run: python -m compileall -q .
       - name: Verify application imports
-        run: python -c "import SDR_to_HDR_cross_platform; import creative_hdr_ui"
+        run: python -c "import SDR_to_HDR_cross_platform; import creative_hdr_ui; import preview_widget; import workspace_ui"
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
+      - name: Save rendered workspace screenshots
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-preview-workspace
+          path: ui_artifacts/*.png
+          if-no-files-found: warn
+          retention-days: 14
