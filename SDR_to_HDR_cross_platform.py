@@ -71,6 +71,7 @@ class ConversionThread(QtCore.QThread):
 
                 if self._cancel_requested:
                     break
+                verification_failed = False
                 if return_code == 0 and self.verify_output is not None:
                     try:
                         self.verify_output(ffmpeg_cmd[-1])
@@ -78,19 +79,24 @@ class ConversionThread(QtCore.QThread):
                             "Verified YouTube HDR output: {}".format(name)
                         )
                     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                        verification_failed = True
                         self.log_output.emit(
                             "YouTube HDR verification failed for {}: {}".format(name, exc)
                         )
-                        return_code = -1
-                if return_code == 0:
+                if return_code == 0 and not verification_failed:
                     succeeded += 1
                 else:
                     failed += 1
-                    self.log_output.emit(
-                        "Conversion failed for {} (FFmpeg exit code {}).".format(
-                            name, return_code if return_code is not None else "unavailable"
+                    if verification_failed:
+                        self.log_output.emit(
+                            "{} was encoded but is NOT verified YouTube HDR-ready.".format(name)
                         )
-                    )
+                    else:
+                        self.log_output.emit(
+                            "Conversion failed for {} (FFmpeg exit code {}).".format(
+                                name, return_code if return_code is not None else "unavailable"
+                            )
+                        )
 
             if self._cancel_requested:
                 self.update_status.emit(
