@@ -1,166 +1,131 @@
 # SDR to HDR Video Converter (Cross-Platform)
 
-A Python + PyQt5 desktop application to map SDR video into 10-bit BT.2020/PQ output using FFmpeg's zscale filter. It supports NVENC or CPU encoding, optional x265 HDR10 static metadata, batch mode, **optional audio passthrough**, and real-time logging. This is a display-referred SDR-to-HDR signal conversion; it cannot recreate highlights already clipped in the original SDR recording.
+A Python + PyQt5 desktop application to map SDR video into 10-bit BT.2020/PQ output using FFmpeg. The **HDR Video Studio** interface provides a live grading preview, optional creative highlight expansion, CPU or NVENC encoding, batch conversion, and a verified YouTube HDR export preset.
 
----
+This is real pixel conversion, not just HDR metadata tagging. Creative grading can expand highlight brightness, but cannot recover detail already clipped in the original SDR recording.
 
-## 🚀 Features
+## Preview-first workflow
 
-- ✅ **SDR to HDR video conversion** using FFmpeg
-- ⚡ **GPU acceleration** with NVENC (with auto fallback to CPU/x265)
-- 🧠 **Auto encoder switching** based on FFmpeg availability
-- 🎛️ **Correct HDR colour transform**: source SDR transfer → linear BT.2020 RGB → 10-bit PQ/BT.2020 YUV
-- 🔢 **Adjustable HDR reference white**: 80–400 nits (200-nit default, based on MovieLabs guidance)
-- 🎚️ **Constant Quality (CRF) slider**
-- 🌈 **Accurate BT.709 → BT.2020 primaries conversion**, with metadata probing for supported SDR input profiles
-- 🔊 **Audio passthrough toggle**: retain original audio or re-encode to AAC
-- 📊 **Static HDR10 metadata with libx265**: BT.709 mastering primaries, appropriate white luminance, MaxCLL and unknown MaxFALL; NVENC carries PQ/BT.2020 colour signalling but does not embed the x265-specific mastering SEI
-- 📝 **`-x265-params`** integration for HDR metadata (compatible with libx265)
-- 🖥️ **Real-time FFmpeg log viewer**
-- 📦 **Batch conversion mode** (process MP4/MOV/MKV files in a folder, one by one)
-- ▶️ **YouTube HDR upload preset**: HEVC Main 10, BT.2020/PQ, x265 HDR10 metadata, adjustable quality presets, measured MaxCLL/MaxFALL, optional two-pass audio loudness normalization, AAC 48 kHz, MP4 fast-start and automatic export validation
-- ❌ **Safe cancellation** of conversions (Windows & Linux)
+1. **Source:** open your SDR video/intermediate and choose an output folder. The preview loads automatically. A local video can also be dragged onto the window.
+2. **Preview and grade:** choose a frame with the timeline. Enable **Creative HDR grade**, select a preset and adjust the **Highlights**, **Tone** or **Colour** controls. Sliders and precise numeric values are linked; each control has a reset button.
+3. **Compare:** drag the divider in **Split comparison**, or select **Before grade** / **After grade**. Grade changes update without encoding the whole video.
+4. **Export:** select **Export settings**, then use the persistent **Export YouTube HDR** or **Export custom** button. Detailed processing messages are available under **Log**.
 
----
+**The preview is an SDR tone-mapped approximation, not native HDR monitor output.** It shares the exporter's float-linear grading expressions, but maps the result into sRGB for a normal Qt image surface. Both halves use the same fixed viewing transform so highlight changes stay visible. Actual HDR brightness and colours outside sRGB require checking an export on an HDR display. Preview resolution and playback do not change export settings.
 
-## 🖥️ GUI Overview
+See [Live preview guide](LIVE_PREVIEW.md) for display limits, timeline controls, proxy playback and batch previews, and [Creative HDR guide](CREATIVE_HDR.md) for grading mathematics and metadata behaviour.
 
-- **Input/Output**: Select a video (or folder in batch mode) and an existing output folder. Output filenames are generated as `<input>_HDR.mp4`.
-- **HDR mapping**: 10-bit mode performs the actual pixel transform to PQ; adjust the 200-nit default reference white cautiously
-- **Encoding Options**:
-  - Bit depth: 10-bit (HDR PQ, default) or 8-bit (SDR-only)
-  - CRF slider (0–51)
-  - GPU toggle (NVENC)
-  - **Audio Passthrough**: Optional toggle to copy original audio stream
-- **HDR Metadata Options**:
-  - For CPU/libx265 10-bit output, embed default static metadata or override MaxCLL/MaxFALL when known
-  - NVENC output includes BT.2020/PQ tags but not x265 static HDR10 mastering SEI
-- **YouTube HDR button**: Separate upload preset. Uses CPU/libx265 and 10-bit PQ with selectable Balanced/High/Maximum quality, automatic full-frame light-level analysis, and optional EBU R128 loudness normalization. Normal conversion settings are unchanged.
-- **Log Output**: Real-time FFmpeg log monitor
-- **Execution**: Batch mode, preview mode, and a cancel-safe exit
+## Features
 
----
+- Accurate source SDR transfer/range/primaries conversion into float32 linear BT.2020, followed by 10-bit PQ encoding.
+- Adjustable HDR reference white, 80–400 nits; default 200 nits.
+- Optional creative HDR grading: highlight expansion and soft roll-off, exposure, contrast, midtones, shadows, black lift, saturation, vibrance, temperature and tint.
+- Live before/after preview with a draggable divider, source-frame cache, timeline, frame stepping and silent proxy playback. Processing runs asynchronously and outdated results are discarded.
+- Preview quality choices: Fast 480, Balanced 640 and Detail 960. These are preview sizes, not export resolutions.
+- CPU x264/x265 or optional NVENC encoding in custom mode; automatic fallback when the requested encoder is absent from the FFmpeg build.
+- YouTube HDR preset: CPU HEVC Main 10, BT.2020/PQ, static HDR10 metadata, adjustable quality, measured content-light values, optional two-pass audio normalization, AAC 48 kHz stereo and MP4 fast-start.
+- Batch MP4/MOV/MKV conversion, progress logging and cancellation. Batch preview uses a separately selected representative clip; folders are not decoded as videos.
+- Separate Grade / Export settings / Log tabs, resizable preview split, collapsible advanced metadata and always-visible export controls.
 
-## 🛠️ Requirements
+## Requirements
 
-- **Python 3.7+**
-- **FFmpeg** (in PATH, with the **zscale/libzimg filter** and libx265 or hevc_nvenc for HDR export)
-- **FFprobe** (recommended for standard export, **required for YouTube HDR** to validate the source and encoded output).
-- **YouTube HDR preset additionally requires a libx265-enabled FFmpeg**. NVENC is deliberately not used for this preset because the application's GPU path does not embed the static HDR10 mastering-display SEI.
-- Python packages:
-  - `PyQt5`
-  - `numpy`
-  - `opencv-python`
-
-### Install Dependencies
+- Python 3.7+ syntax compatibility; CI uses Python 3.11. Use a Python version supported by your installed dependencies.
+- `PyQt5`, `numpy`, `opencv-python`.
+- **FFmpeg** on PATH, including `zscale`/libzimg and the appropriate encoder. Creative grading requires `geq`; preview additionally requires `tonemap`, `setparams`, `split`, `hstack` and `format`.
+- **FFprobe** is required for live preview, creative grading and the YouTube preset. Standard accurate conversion can fall back to an explicitly logged BT.709 limited-range assumption without it.
+- **libx265** is required for YouTube export. That preset deliberately does not use NVENC because the application's NVENC path does not embed x265-specific static mastering SEI.
 
 ```bash
 pip install PyQt5 numpy opencv-python
-```
-
----
-
-## ▶️ How to Run
-
-```bash
 python SDR_to_HDR_cross_platform.py
 ```
 
----
+Most complete FFmpeg distributions include FFprobe and the required filters. On macOS the application also checks common Homebrew installation paths.
 
-## 🏗️ Build Executable (Optional)
+## Build the Windows executable
 
-To build a standalone executable:
+From the complete updated repository:
 
-```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed SDR_to_HDR_cross_platform.py
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller --clean --onefile --windowed SDR_to_HDR_cross_platform.py
 ```
 
-> Output will be in the `dist/` directory.
+The executable is generated in `dist`. The imports include the preview/workspace modules automatically. **Previously published EXEs do not acquire source changes automatically**; rebuild before testing the new interface. FFmpeg/FFprobe remain external tools and are not bundled by this command.
 
----
+## Export modes
 
-## 📂 Supported Input Formats
+### Custom export
 
-- `.mp4`
-- `.mov`
-- `.mkv`
+**Export custom** uses the controls in the Custom export section: 10-bit HDR or 8-bit SDR, CPU/NVENC, constant quality, and optional audio copy. Lower CRF means a higher quality target; hardware encoding uses its own quantizer setting.
 
----
+10-bit output uses `_HDR.mp4`; 8-bit output uses `_SDR.mp4` and is not labelled HDR. Creative grading is rejected for 8-bit output. Audio copy requires the source codec to be compatible with MP4.
 
-## ⚠️ Notes
-
-- **Never relabel unconverted SDR as PQ HDR.** In 10-bit mode, the application automatically applies the zscale BT.709/other-supported-SDR to display-linear BT.2020 to PQ conversion before encoding.
-- 10-bit HDR outputs use `_HDR.mp4`. 8-bit SDR outputs use `_SDR.mp4` and are not tagged as HDR. YouTube HDR outputs use `_YouTube_HDR.mp4`.
-- HDR PQ reference white defaults to 200 nits: the original SDR image is mapped into an HDR container without inventing detail above the SDR source's available range.
-- CPU/libx265 can embed static ST 2086 + MaxCLL/MaxFALL SEI; NVENC output is tagged PQ/BT.2020 but does **not** embed those x265-specific SEI fields.
-- Only tested SDR colour formats can be converted. Declared HDR PQ/HLG inputs and unsupported declared primaries/transfers/matrices are rejected rather than silently producing incorrect output.
-- Untagged input is assumed to be limited-range BT.709; test visually and provide correctly tagged SDR sources for non-BT.709 footage.
-- If GPU encoding is unavailable, the app falls back to CPU-based x264 (8-bit) or x265 (10-bit)
-- Select an existing **output folder** in either mode; manually typing an MP4 output filename remains supported in single-file mode.
-- Batch mode processes video files directly inside the selected input folder; it does not scan subfolders.
-- Batch mode skips files named `*_HDR.*`, `*_SDR.*` and `*_YouTube_HDR.*` when the input and output folder are the same, to avoid reprocessing previous output. Existing destination files are still overwritten by FFmpeg (`-y`).
-- If FFmpeg is not found, install it and add it to PATH; on macOS the standard Homebrew locations are also checked.
-- Audio passthrough only works with compatible input formats and codecs
-- FFmpeg output is streamed to the log viewer in real time
-- Cancel safely terminates long-running conversions
-- HDR preview is not yet implemented. Use an HDR-capable player/display to verify the resulting picture.
+CPU x265 can embed static ST 2086 mastering and content-light metadata. NVENC produces PQ/BT.2020 signalling but this application's GPU path does not embed those static x265 SEI fields. The creative pixel grade itself remains CPU-based on either route.
 
 ### YouTube HDR export
 
-1. Select an SDR video and an existing output folder (or use batch mode).
-2. Choose a YouTube quality profile, leave **Measure MaxCLL / MaxFALL** enabled unless you have your own measured light-level metadata, and optionally enable **Normalize YouTube audio**. Click **Export YouTube HDR MP4**.
-3. The preset converts SDR video into 10-bit Rec.2020/PQ using the existing colour-accurate zscale pipeline, encodes HEVC Main 10 with CPU/libx265 and embeds ST 2086 mastering + content-light metadata. It also transcodes the first audio stream to 48 kHz stereo AAC at 384 kb/s (downmixing multichannel audio) and writes an MP4 with the moov atom at the beginning and with MP4 edit lists disabled.
-4. After FFmpeg finishes, FFprobe verifies the HEVC Main 10 profile, 10-bit format, PQ/Rec.2020 signalling, static HDR10 SEI, audio characteristics, and MP4 fast-start structure without edit lists. If validation fails, the app reports an error instead of success.
-5. Upload the resulting `*_YouTube_HDR.mp4` through YouTube Studio normally. There is no automatic upload or OAuth integration.
+Choose a quality profile under **Export settings → YouTube HDR export**, leave **Measure content-light metadata** enabled unless supplying known values in accurate mode, optionally enable **Normalize audio**, and click **Export YouTube HDR**.
 
-**Source requirements:** progressive, even dimensions, at least 720 pixels on the shorter edge, common YouTube HDR frame rates (23.976/24/25/29.97/30/48/50/59.94/60 fps), tagged or correctly assumed SDR BT.709 primaries. Explicitly non-BT.709 sources, existing PQ/HLG HDR, interlaced footage and unsupported sizes/rates are rejected by this preset; use the standard converter for other material. The preset preserves input frame rate and dimensions rather than silently resampling.
+The preset converts SDR to 10-bit BT.2020/PQ and encodes HEVC Main 10 with CPU x265. It writes HDR10 mastering and content-light metadata, first-audio-stream stereo AAC at 48 kHz / 384 kb/s, `hvc1`, MP4 fast-start and no edit lists. Output filenames end in `_YouTube_HDR.mp4`.
 
-**Quality profiles:** the YouTube exporter uses x265 quality-based, variable-bitrate encoding: **Balanced** = CRF 20/medium, **High** (default) = CRF 16/medium, and **Maximum** = CRF 12/slow. A smaller CRF produces higher quality/larger files; **there is no mandatory minimum bitrate**, because YouTube transcodes uploads and simple animations compress exceptionally well. This preset is not an HDR creative grade, and it cannot recover detail missing from SDR footage.
+After encoding, FFprobe checks the actual video profile, pixel format, colour signalling, static metadata and audio characteristics; container checks verify fast-start and the absence of edit lists. An output that fails verification is not reported as successfully verified. These checks cannot guarantee YouTube ingestion or visual quality.
 
-**Automatic HDR light metadata:** the full input is scanned in the same display-linear Rec.2020 stage used by the PQ encoder. The scan measures the brightest pixel's luminance (**MaxCLL**) and the brightest frame's average luminance (**MaxFALL**) in nits, then injects those numbers into the x265 content-light SEI for the export. No 8-bit greyscale guessing. This extra full-resolution pass can take substantial time on long/4K videos; it runs in the background conversion worker and can be cancelled. The measured values reflect the pre-encode mapping, so lossy HEVC compression can cause small output-level differences. If you explicitly check **Override HDR Metadata**, your manual values take precedence and automatic analysis is skipped. With analysis disabled and no override, defaults remain reference-white MaxCLL (normally 200 nits) and unknown MaxFALL (0).
+| YouTube quality | x265 CRF | Speed preset |
+| --- | --- | --- |
+| Balanced | 20 | medium |
+| High (default) | 16 | medium |
+| Maximum | 12 | slow |
 
-**Optional audio normalization:** unchecked by default. When enabled and the input has audio, FFmpeg analyzes the entire first audio stream using EBU R128 loudnorm, with the same stereo downmix as the eventual output, then applies measured loudnorm settings during encoding. The target is **-16 LUFS integrated, at most -1.5 dBTP, LRA 11**. If linear correction cannot satisfy the true-peak/LRA constraints, FFmpeg can use dynamic normalization, which may alter dynamics. Audio is still 48 kHz stereo AAC. The -16 LUFS target is an **application choice, not an official YouTube requirement**. Silent/no-audio tracks are left unnormalized.
+These are quality-based variable-bitrate profiles, not mandatory bitrate targets. The normal custom quality/GPU/audio-copy controls do not override the YouTube preset.
 
-**Upload acceptance:** the exporter checks the local encoded file. YouTube still needs to ingest, analyse and transcode it; the HDR quality selection may not appear immediately or at all if YouTube rejects the metadata. Test a short unlisted upload before releasing a long video.
+**Source restrictions:** supported SDR BT.709 primaries, even dimensions, at least 720 pixels on the short edge, and common frame rates (23.976/24/25/29.97/30/48/50/59.94/60 fps). Declared interlaced footage and unsupported sizes/rates are rejected by this preset. Input dimensions and timing are retained rather than silently upscaled or interpolated. Already-HDR PQ/HLG sources are rejected by the SDR converter.
 
-- [YouTube: upload HDR videos](https://support.google.com/youtube/answer/7126552?hl=en)
-- [YouTube: recommended upload encoding settings](https://support.google.com/youtube/answer/1722171?hl=en)
+**Automatic light analysis:** a full-resolution pass measures peak pixel CIE luminance and highest frame-average luminance in the display-linear conversion pipeline, and writes the calculated MaxCLL/MaxFALL fields. Lossy encoding can cause small differences in final pixel extrema. Accurate mode honours explicit manual overrides; with analysis disabled its defaults are reference-white MaxCLL (normally 200 nits) and unknown MaxFALL (0).
 
-### Run the regression tests
+**Creative mode always analyses after grading**, using exactly the same linear-stage grade as the encoder. Previous manual values are not reused. Its mastering metadata describes a virtual BT.2020/D65 target and selected peak ceiling, not a measurement of a physical mastering monitor.
+
+**Audio normalization** is optional and off by default. It measures the first audio stream after the same stereo downmix used for export, then applies a measured second-pass FFmpeg loudnorm filter targeting −16 LUFS, −1.5 dBTP and LRA 11. The target is an application choice, not an official YouTube requirement. FFmpeg may use dynamic normalization when linear gain cannot meet the constraints; dynamics can change. Silent/no-audio sources are left unnormalized. AAC encoding can slightly change decoded peaks.
+
+Upload the completed file through YouTube Studio normally; the app does not upload or authenticate to YouTube. Use footage you have permission to upload and check a short unlisted test after processing.
+
+- [YouTube HDR upload requirements](https://support.google.com/youtube/answer/7126552?hl=en)
+- [YouTube upload encoding settings](https://support.google.com/youtube/answer/1722171?hl=en)
+
+## Preview and grading limits
+
+- **Before grade** is the accurate conversion without the creative treatment, viewed through the same SDR display transform as **After grade**. It is not a native HDR presentation or an untouched-source player.
+- The preview resizes before grading for responsiveness; it is not a full-resolution pixel proof. Export still uses full-resolution pixels and content-light analysis.
+- **Play proxy** is a silent, performance-limited frame browser, not smooth 60 fps playback or an audio-sync check. The timeline and frame buttons are for choosing representative grading frames.
+- Preview pauses while an export is running; source and grading controls are locked to prevent confusion with the export snapshot. The log stays accessible.
+- Creative colour controls are not recovery of authentic wide-gamut detail, and the peak ceiling is not a promise that every white object reaches that luminance.
+- Accurate mode remains the default. Reset or uncheck Creative HDR grade to restore it.
+
+## File and batch behaviour
+
+Supported inputs are `.mp4`, `.mov` and `.mkv`. Select an existing output folder; an explicit `.mp4` destination remains supported in single-file mode. Source files are not modified.
+
+Batch mode processes files directly in the input folder, not subfolders. When input/output folders are the same it skips files with generated `_HDR`, `_SDR` and `_YouTube_HDR` endings. **Existing destination files are overwritten** by the existing FFmpeg `-y` behaviour; use a different output folder when retaining earlier grades.
+
+Supported source colour metadata is honoured. Untagged sources assume limited-range BT.709, disclosed in the preview or logs as applicable. Other declared unsupported colour profiles are rejected rather than silently misinterpreted.
+
+## Tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-The GUI integration tests need the application's PyQt5, NumPy and OpenCV dependencies. The optional FFmpeg integration tests also exercise the actual zscale filter against synthetic skin-like and neutral patches, full-frame HDR luminance metadata, and two-pass loudness normalization. GitHub Actions runs the GUI tests in an offscreen Qt environment.
+GitHub Actions runs GUI/import/unit tests on Windows, Linux and macOS. FFmpeg-dependent tests run where the tools are installed (Linux CI installs them). Tests cover existing export behaviour, colour fidelity, grading, metadata, audio, asynchronous preview cancellation/stale results and an actual Qt/FFmpeg live-preview session. Linux CI stores rendered workspace screenshots as an artifact. Skips are reported rather than counted as media-pipeline validation.
 
----
+## References and limitations
 
-## Technical reference
-
-[MovieLabs: Best Practices for Mapping BT.709 Content to HDR10 (PDF)](https://www.movielabs.com/ngvideo/MovieLabs_Mapping_BT.709_to_HDR10_v1.0.pdf). Its 200-nit SDR-reference-white, linear display-light, BT.2020 primary conversion and PQ method are used here. FFmpeg's [zscale filter documentation](https://ffmpeg.org/ffmpeg-filters.html#zscale-1) documents the filter parameters.
-
-**Known limitation:** this conversion preserves SDR colour/detail within an HDR transfer function; it is **not** AI reconstruction of original clipped highlights and not an artistically graded native HDR master.
-
----
-
-## 📄 License
-
-MIT License
-
----
-
-## 🙋‍♂️ Author
-
-Developed by Coolythecoder
-
----
-
-## 🙌 Acknowledgments
-
-- [FFmpeg](https://ffmpeg.org/)
-- [x264](https://www.videolan.org/developers/x264.html)
-- [x265](https://x265.org/)
+- [MovieLabs BT.709-to-HDR10 mapping](https://www.movielabs.com/ngvideo/MovieLabs_Mapping_BT.709_to_HDR10_v1.0.pdf)
+- [FFmpeg filter documentation](https://ffmpeg.org/ffmpeg-filters.html)
+- [x265 documentation](https://x265.readthedocs.io/en/master/cli.html)
 - [PyQt5](https://riverbankcomputing.com/software/pyqt/)
+
+This is a conversion and creative regrading tool, not reconstruction of clipped source highlights or certification of a professional HDR master. Actual HDR display review remains necessary.
+
+## License and author
+
+MIT License. Developed by Coolythecoder.
