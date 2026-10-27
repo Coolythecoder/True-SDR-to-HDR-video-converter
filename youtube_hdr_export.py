@@ -201,7 +201,7 @@ def verify_youtube_hdr_file(ffprobe_exe, path):
         raise ValueError("YouTube HDR output was not created.")
     data = _probe(
         ffprobe_exe, path,
-        "stream=index,codec_type,codec_name,profile,pix_fmt,color_primaries,"
+        "stream=index,codec_type,codec_name,profile,pix_fmt,codec_tag_string,color_primaries,"
         "color_transfer,color_space,color_range,width,height,avg_frame_rate,sample_rate,channels:format=format_name",
     )
     video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
@@ -209,6 +209,7 @@ def verify_youtube_hdr_file(ffprobe_exe, path):
         raise ValueError("YouTube HDR validation: no video stream found.")
     expected = {
         "codec_name": "hevc",
+        "codec_tag_string": "hvc1",
         "profile": "Main 10",
         "pix_fmt": "yuv420p10le",
         "color_primaries": "bt2020",
