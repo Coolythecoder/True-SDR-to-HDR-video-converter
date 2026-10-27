@@ -15,6 +15,12 @@ from hdr_processing import build_sdr_to_pq_filter, x265_sdr_mastering_params
 
 YOUTUBE_SUFFIX = "_YouTube_HDR"
 YOUTUBE_CRF = 16
+# CRF is a perceptual quality target, not a hardcoded output bitrate.
+YOUTUBE_QUALITY_PROFILES = {
+    "Balanced": (20, "medium"),
+    "High": (16, "medium"),
+    "Maximum": (12, "slow"),
+}
 YOUTUBE_FPS = (Fraction(24000, 1001), Fraction(24), Fraction(25),
                Fraction(30000, 1001), Fraction(30), Fraction(48),
                Fraction(50), Fraction(60000, 1001), Fraction(60))
@@ -86,12 +92,16 @@ def validate_youtube_source(ffprobe_exe, input_path, colour_profile):
         raise ValueError(
             "Unsupported source frame rate for this YouTube HDR preset: {}.".format(fps)
         )
+    video = dict(video)
+    video["has_audio"] = any(
+        s.get("codec_type") == "audio" for s in data.get("streams", [])
+    )
     return video
 
 
 def build_youtube_hdr_command(ffmpeg_exe, input_path, output_path, colour_profile,
                               white_nits=200, crf=YOUTUBE_CRF,
-                              max_cll=None, max_fall=0):
+                              max_cll=None, max_fall=0, preset="medium"):
     """Keep original frame rate and size, and embed real static HDR10 metadata."""
     if Path(output_path).suffix.lower() != ".mp4":
         raise ValueError("YouTube HDR export requires an .mp4 destination.")
@@ -99,6 +109,8 @@ def build_youtube_hdr_command(ffmpeg_exe, input_path, output_path, colour_profil
         raise ValueError("YouTube HDR export requires BT.709 SDR input.")
     if type(crf) is not int or not 0 <= crf <= 28:
         raise ValueError("YouTube HDR CRF must be an integer between 0 and 28.")
+    if preset not in ("medium", "slow"):
+        raise ValueError("Unsupported YouTube encoder speed preset.")
     colour_filter = build_sdr_to_pq_filter(
         colour_profile, white_nits, pixel_format="yuv420p10le"
     )
@@ -107,7 +119,7 @@ def build_youtube_hdr_command(ffmpeg_exe, input_path, output_path, colour_profil
         ffmpeg_exe, "-y", "-i", str(input_path),
         "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
         "-vf", colour_filter,
-        "-c:v", "libx265", "-profile:v", "main10", "-preset", "medium",
+        "-c:v", "libx265", "-profile:v", "main10", "-preset", preset,
         "-crf", str(crf), "-pix_fmt", "yuv420p10le",
         "-color_primaries", "bt2020", "-color_trc", "smpte2084",
         "-colorspace", "bt2020nc", "-color_range", "tv",
