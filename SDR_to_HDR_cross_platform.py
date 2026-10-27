@@ -21,6 +21,8 @@ from creative_hdr import active_grade, require_creative_filters, probe_grade_geo
 from creative_hdr_pipeline import grade_command
 from creative_hdr_ui import CreativeHDRPanel
 from workspace_ui import build_workspace, set_exporting
+from gpu_colour import choose_gpu_plan
+from gpu_decode import choose_nvidia_decoder
 
 
 class ConversionThread(QtCore.QThread):
@@ -34,6 +36,7 @@ class ConversionThread(QtCore.QThread):
         self.prepare_job = prepare_job
         self._process = None
         self._cancel_requested = False
+        self.resources = []
 
     def run(self):
         succeeded = 0
@@ -112,6 +115,13 @@ class ConversionThread(QtCore.QThread):
                     "Status: Conversion complete ({} succeeded).".format(succeeded))
         except Exception as exc:
             self.update_status.emit("Status: Unexpected conversion error - {}".format(exc))
+        finally:
+            for resource in self.resources:
+                try:
+                    resource.close()
+                except OSError:
+                    pass
+            self.resources.clear()
 
     def cancel(self):
         self._cancel_requested = True
@@ -318,6 +328,10 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         quality_crf, quality_preset = YOUTUBE_QUALITY_PROFILES[self.youtube_quality.currentText()]
         analyse_light = creative or (youtube_mode and self.youtube_analyse_light.isChecked())
         normalize_audio = youtube_mode and self.youtube_normalize_audio.isChecked()
+        accelerate = self.processing_gpu.isChecked() and bit_depth == "10"
+        gpu_decoding = self.hardware_decode.isChecked() and bit_depth == "10"
+        # Snapshots only. Workers never read changing GUI controls.
+        gpu_state = {"attempted": False, "plan": None}
         if creative:
             self.log_output.appendPlainText(
                 "Creative HDR enabled: {}. Post-grade MaxCLL/MaxFALL analysis is mandatory; manual light values are not reused. The peak is a virtual BT.2020 mastering target, not a measured display.".format(grade))
@@ -328,6 +342,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         try:
             for source, destination in jobs:
                 profile = probe_sdr_profile(ffprobe_exe, source)
+                youtube_preflights[source] = (profile, {})
                 if youtube_mode:
                     source_info = validate_youtube_source(ffprobe_exe, source, profile)
                     youtube_preflights[source] = (profile, source_info)
@@ -365,7 +380,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                     self.youtube_quality.currentText(), quality_crf, quality_preset, analyse_light, normalize_audio))
             verify_output = lambda output: verify_youtube_hdr_file(ffprobe_exe, output)
         prepare_job = None
-        if analyse_light or normalize_audio:
+        if analyse_light or normalize_audio or gpu_decoding:
             def prepare_job(ffmpeg_cmd, worker):
                 source = ffmpeg_cmd[ffmpeg_cmd.index("-i") + 1]
                 profile, info = youtube_preflights[source]
@@ -378,15 +393,51 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 def cancelled():
                     return worker._cancel_requested
 
+                decoder = None
+                if gpu_decoding:
+                    worker.update_status.emit("Status: Checking GPU decoding...")
+                    decoder = choose_nvidia_decoder(
+                        ffmpeg_exe, ffprobe_exe, source, profile,
+                        log=worker.log_output.emit, cancelled=cancelled,
+                        register_process=register_process)
+                if accelerate and analyse_light and not gpu_state["attempted"]:
+                    gpu_state["attempted"] = True
+                    worker.update_status.emit("Status: Checking GPU colour processing...")
+                    try:
+                        gpu_state["plan"] = choose_gpu_plan(
+                            ffmpeg_exe, grade if creative else None, reference_white,
+                            log=worker.log_output.emit, cancelled=cancelled,
+                            register_process=register_process)
+                    except (ValueError, OSError) as exc:
+                        worker.log_output.emit("GPU check failed; retaining CPU processing: " + str(exc))
+                    if gpu_state["plan"] is not None:
+                        worker.resources.append(gpu_state["plan"])
+                gpu = gpu_state["plan"]
                 light_levels = None
                 audio_stats = None
                 if analyse_light:
                     worker.update_status.emit("Status: Measuring {}MaxCLL/MaxFALL: {}".format(
                         "post-grade " if creative else "", os.path.basename(source)))
-                    light_levels = measure_content_light(
-                        ffmpeg_exe, source, profile, int(info["width"]), int(info["height"]),
-                        reference_white, register_process=register_process,
-                        cancelled=cancelled, progress=worker.log_output.emit, grade=grade if creative else None)
+                    try:
+                        light_levels = measure_content_light(
+                            ffmpeg_exe, source, profile, int(info["width"]), int(info["height"]),
+                            reference_white, register_process=register_process,
+                            cancelled=cancelled, progress=worker.log_output.emit,
+                            grade=grade if creative else None, gpu_plan=gpu, decode_plan=decoder)
+                    except (ValueError, OSError) as exc:
+                        if cancelled():
+                            raise ExportCancelled()
+                        if gpu is None and decoder is None:
+                            raise
+                        worker.log_output.emit(
+                            "Accelerated analysis failed; restarting the complete scan on CPU: " + str(exc))
+                        # Never combine metadata from a failed GPU scan with a CPU encode.
+                        gpu_state["plan"] = gpu = decoder = None
+                        light_levels = measure_content_light(
+                            ffmpeg_exe, source, profile, int(info["width"]), int(info["height"]),
+                            reference_white, register_process=register_process,
+                            cancelled=cancelled, progress=worker.log_output.emit,
+                            grade=grade if creative else None)
                     worker.log_output.emit(
                         "Measured HDR light levels: MaxCLL={} nits, MaxFALL={} nits ({} frames).".format(*light_levels))
                 if normalize_audio and info.get("has_audio", False):
@@ -401,9 +452,19 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                                 audio_stats["input_i"], audio_stats["input_tp"]))
                 elif normalize_audio:
                     worker.log_output.emit("Source has no audio; normalization was skipped.")
-                return apply_youtube_analysis(
+                prepared = apply_youtube_analysis(
                     ffmpeg_cmd, reference_white, light_levels=light_levels,
                     audio_measurements=audio_stats, grade=grade if creative else None)
+                if gpu is not None:
+                    prepared = gpu.export_command(prepared, profile)
+                if decoder is not None:
+                    prepared = decoder.apply(prepared)
+                worker.log_output.emit(
+                    "Processing backend: grade={}; decode={}; video encoder={} (quality/audio unchanged).".format(
+                        "OpenCL" if gpu is not None and creative else "CPU",
+                        "NVDEC" if decoder is not None else "CPU",
+                        prepared[prepared.index("-c:v") + 1]))
+                return prepared
         self.conversion_thread = ConversionThread(
             commands, self, verify_output=verify_output, prepare_job=prepare_job)
         self.conversion_thread.update_status.connect(self.status_label.setText)

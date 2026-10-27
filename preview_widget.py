@@ -8,6 +8,7 @@ from conversion_paths import find_ffmpeg
 from hdr_processing import find_ffprobe
 from creative_hdr import CreativeHDRSettings
 from grading_preview import source_from_probe, probe_command, decode_command, render_command
+from gpu_preview import PreviewAcceleration
 
 
 class PreviewEngine(QtCore.QObject):
@@ -22,6 +23,7 @@ class PreviewEngine(QtCore.QObject):
         self.ffmpeg = None
         self.process = None
         self.phase = ''
+        self.acceleration = PreviewAcceleration(self)
         self.cache = OrderedDict()
         self.seconds = 0.0
         self.bound = 640
@@ -36,6 +38,11 @@ class PreviewEngine(QtCore.QObject):
         self.debounce.setSingleShot(True)
         self.debounce.setInterval(160)
         self.debounce.timeout.connect(self._schedule)
+
+    def set_gpu_enabled(self, enabled):
+        self.cancel()
+        self.acceleration.reset(enabled)
+        self.request()
 
     def cancel(self):
         self.debounce.stop()
@@ -140,13 +147,15 @@ class PreviewEngine(QtCore.QObject):
                                      pair.copy(width, 0, width, height),
                                      key[1] / self.source.fps,
                                      time.monotonic() - started)
-            self._launch(render_command(self.ffmpeg, width, height, self.grade, self.white_nits),
-                         'render', rendered, payload=self.cache[key], limit=width * height * 6 + 1024)
+            if not self.acceleration.render(width, height, self.grade, self.white_nits,
+                                            rendered, self.cache[key], width * height * 6 + 1024):
+                self._launch(render_command(self.ffmpeg, width, height, self.grade, self.white_nits),
+                             'render', rendered, payload=self.cache[key], limit=width * height * 6 + 1024)
         except (ValueError, OSError, TypeError, KeyError) as exc:
             self.cancel()
             self.failed.emit(str(exc))
 
-    def _launch(self, command, phase, callback, payload=None, limit=8 * 1024 * 1024):
+    def _launch(self, command, phase, callback, payload=None, limit=8 * 1024 * 1024, on_error=None, cleanup=None):
         process = QtCore.QProcess(self)
         self.process = process
         self._processes.add(process)
@@ -180,6 +189,11 @@ class PreviewEngine(QtCore.QObject):
                 self.phase = ''
             self._processes.discard(process)
             process.deleteLater()
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except OSError:
+                    pass
             if not current or self.closed or self.paused:
                 return
             error = state['error']
@@ -187,7 +201,10 @@ class PreviewEngine(QtCore.QObject):
                 error = error or state['stderr'].decode('utf-8', errors='replace')[-1200:]
                 error = error or 'FFmpeg could not render this preview.'
             if error:
-                self.failed.emit(error)
+                if on_error is not None:
+                    on_error(error)
+                else:
+                    self.failed.emit(error)
                 return
             try:
                 callback(bytes(state['stdout']))
@@ -229,6 +246,7 @@ class PreviewEngine(QtCore.QObject):
         for process in list(self._processes):
             process.kill()
             process.waitForFinished(1500)
+        self.acceleration.close()
 
 
 class CompareCanvas(QtWidgets.QWidget):
@@ -444,7 +462,7 @@ class GradingPreview(QtWidgets.QWidget):
     def _frame_ready(self, before, after, seconds, elapsed):
         self.canvas.set_frames(before, after)
         self.status.setText('Preview at {:.3f} s • updated in {:.2f} s • {}'.format(
-            seconds, elapsed, 'Creative grade' if self.panel.isChecked() else 'Accurate conversion'))
+            seconds, elapsed, self.engine.acceleration.backend))
         if self.playing:
             self.tick.start(50)
 

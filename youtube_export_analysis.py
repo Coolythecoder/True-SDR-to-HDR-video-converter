@@ -65,7 +65,7 @@ def _read_frame(pipe, frame_bytes, cancelled=None):
 
 def measure_content_light(
     ffmpeg_exe, input_path, profile, width, height, white_nits,
-    register_process=None, cancelled=None, progress=None, grade=None
+    register_process=None, cancelled=None, progress=None, grade=None, gpu_plan=None, decode_plan=None
 ):
     """Return (MaxCLL, MaxFALL, frame_count) after the optional creative grade.
 
@@ -84,6 +84,19 @@ def measure_content_light(
         "-vf", build_sdr_to_linear_filter(profile, grade=grade, white_nits=white_nits),
         "-pix_fmt", "gbrpf32le", "-f", "rawvideo", "pipe:1",
     ]
+    if gpu_plan is not None:
+        from creative_hdr import CreativeHDRSettings
+        from gpu_colour import tile_light_levels
+        if gpu_plan.grade != (grade or CreativeHDRSettings()) or gpu_plan.white_nits != white_nits:
+            raise ValueError("GPU analysis settings differ from the export snapshot.")
+        tw, th = (width + 15) // 16, (height + 15) // 16
+        frame_bytes = tw * th * 2 * 4
+        command[command.index("-vf") + 1] = (
+            build_sdr_to_linear_filter(profile) + "," + gpu_plan.filter((width, height)))
+        command[command.index("-pix_fmt") + 1] = "grayf32le"
+        command = gpu_plan.wrap(command)
+    if decode_plan is not None:
+        command = decode_plan.apply(command)
     _check_cancel(cancelled)
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as errors:
         process = subprocess.Popen(
@@ -99,10 +112,11 @@ def measure_content_light(
                 frame_data = _read_frame(process.stdout, frame_bytes, cancelled)
                 if frame_data is None:
                     break
-                planar = np.frombuffer(frame_data, dtype="<f4").reshape(
-                    (3, height, width)
-                )
-                pixel, frame_average = linear_frame_light_levels(planar, white_nits)
+                if gpu_plan is not None:
+                    pixel, frame_average = tile_light_levels(frame_data, width, height, white_nits)
+                else:
+                    planar = np.frombuffer(frame_data, dtype="<f4").reshape((3, height, width))
+                    pixel, frame_average = linear_frame_light_levels(planar, white_nits)
                 max_pixel = max(max_pixel, pixel)
                 max_frame = max(max_frame, frame_average)
                 frame_count += 1
