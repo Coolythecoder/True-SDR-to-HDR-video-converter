@@ -1,0 +1,39 @@
+name: Legacy FFmpeg float transport
+
+on:
+  push:
+    paths:
+      - '**.py'
+      - '.github/workflows/legacy-float-tests.yml'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-opencl:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      HDR_TEST_OPENCL_DEVICE: '0.0'
+      HDR_EXPECT_LEGACY_FLOAT_MERGE: '1'
+      POCL_MAX_PTHREAD_COUNT: '4'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install legacy FFmpeg and software OpenCL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg pocl-opencl-icd
+          python -m pip install PyQt5 numpy opencv-python-headless
+          ffmpeg -version
+      - name: Reproduce the original defect and verify lossless reassembly
+        run: python -m unittest discover -s tests -p 'test_gpu_float_transport.py' -v
+      - name: Validate actual OpenCL grading and full-size previews
+        run: |
+          python -m unittest discover -s tests -p 'test_gpu_colour.py' -v
+          python -m unittest discover -s tests -p 'test_gpu_preview_recovery.py' -v
+          python -m unittest discover -s tests -p 'test_gpu_media.py' -v
