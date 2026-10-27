@@ -114,7 +114,8 @@ def build_youtube_hdr_command(ffmpeg_exe, input_path, output_path, colour_profil
         "-x265-params", mastering,
         "-tag:v", "hvc1",
         "-c:a", "aac", "-b:a", "384k", "-ar", "48000", "-ac", "2",
-        "-movflags", "+faststart", str(output_path),
+        "-movflags", "+faststart+negative_cts_offsets",
+        "-use_editlist", "0", str(output_path),
     ]
 
 
@@ -149,6 +150,45 @@ def _mp4_moov_before_mdat(path):
             if moov is not None and mdat is not None:
                 break
         return moov is not None and mdat is not None and moov < mdat
+
+
+def _mp4_boxes(file, first, last):
+    """Walk MP4 box headers safely without loading potentially huge media data."""
+    position = first
+    for _ in range(500):
+        if position + 8 > last:
+            break
+        file.seek(position)
+        box_size, box_type = struct.unpack(">I4s", file.read(8))
+        header = 8
+        if box_size == 1:
+            if position + 16 > last:
+                raise ValueError("Truncated MP4 large-size box.")
+            box_size = struct.unpack(">Q", file.read(8))[0]
+            header = 16
+        elif box_size == 0:
+            box_size = last - position
+        if box_size < header or position + box_size > last:
+            raise ValueError("Invalid MP4 box size.")
+        yield box_type, position + header, position + box_size
+        position += box_size
+
+
+def _mp4_has_edit_list(path):
+    """YouTube recommends MP4 uploads without moov/trak/edts edit lists."""
+    with open(path, "rb") as file:
+        size = Path(path).stat().st_size
+        for box, start, end in _mp4_boxes(file, 0, size):
+            if box == b"moov":
+                for child, child_start, child_end in _mp4_boxes(file, start, end):
+                    if child == b"trak":
+                        for track_child, _, _ in _mp4_boxes(
+                            file, child_start, child_end
+                        ):
+                            if track_child == b"edts":
+                                return True
+                return False
+    raise ValueError("MP4 moov atom is missing.")
 
 
 def verify_youtube_hdr_file(ffprobe_exe, path):
@@ -193,6 +233,8 @@ def verify_youtube_hdr_file(ffprobe_exe, path):
             raise ValueError("YouTube HDR validation: audio is not stereo AAC at 48 kHz.")
     if not _mp4_moov_before_mdat(path):
         raise ValueError("YouTube HDR validation: MP4 fast-start moov atom missing.")
+    if _mp4_has_edit_list(path):
+        raise ValueError("YouTube HDR validation: MP4 contains edit lists (edts).")
 
     try:
         output = subprocess.run(
