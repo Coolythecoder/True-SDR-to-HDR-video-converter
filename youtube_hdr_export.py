@@ -31,10 +31,11 @@ def supports_libx265(ffmpeg_exe):
         return False
     if completed.returncode:
         return False
-    return any(
-        len(parts := line.split()) >= 2 and parts[1] == "libx265"
-        for line in completed.stdout.splitlines()
-    )
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "libx265":
+            return True
+    return False
 
 
 def _probe(ffprobe_exe, path, show_entries):
