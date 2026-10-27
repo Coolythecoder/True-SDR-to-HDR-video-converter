@@ -1,0 +1,58 @@
+name: Windows GPU-only build
+
+on:
+  push:
+    branches: ['feat/optional-cuda-only-export']
+  pull_request:
+    paths:
+      - '**.py'
+      - 'requirements-gpu-only.txt'
+      - 'GPU_ONLY_MODE.md'
+      - '.github/workflows/windows-gpu-only.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install pinned optional CUDA dependencies and build tools
+        run: |
+          python -m pip install -r requirements-gpu-only.txt
+          python -m pip install "pyinstaller>=6.16,<7"
+          choco install ffmpeg --yes --no-progress
+      - name: Compile generated CUDA kernels without GPU hardware
+        run: python validate_cuda_build.py
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Build Windows folder executable
+        run: python build_gpu_only.py
+      - name: Smoke-test packaged GUI and actual bundled CUDA libraries
+        shell: python
+        run: |
+          from pathlib import Path
+          import json, subprocess
+          root = Path('dist/HDRVideoStudio-GPU')
+          exe = root / 'HDRVideoStudio-GPU.exe'
+          assert exe.is_file()
+          subprocess.run([str(exe), '--smoke-test'], check=True, timeout=90)
+          report = root / 'BUNDLE_VALIDATION.json'
+          result = subprocess.run([str(exe), '--bundle-check', str(report.resolve())], timeout=90)
+          if report.is_file():
+              print(report.read_text(encoding='utf-8'))
+          result.check_returncode()
+          assert json.loads(report.read_text())['success']
+          print('Packaged GUI, CuPy imports and bundled NVRTC compilation passed. GPU execution is untested.')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HDRVideoStudio-GPU-Windows
+          path: dist/HDRVideoStudio-GPU
+          retention-days: 14
