@@ -32,6 +32,15 @@ class GuiWorkflowTests(unittest.TestCase):
     def tearDown(self):
         self.widget.close()
 
+    def test_controls_are_inside_scrollable_page(self):
+        scroll = self.widget.findChild(QtWidgets.QScrollArea)
+        self.assertIsNotNone(scroll)
+        self.assertTrue(scroll.widgetResizable())
+        self.assertIsNotNone(scroll.widget())
+        self.assertEqual(self.widget.youtube_quality.currentText(), "High")
+        self.assertTrue(self.widget.youtube_analyse_light.isChecked())
+        self.assertFalse(self.widget.youtube_normalize_audio.isChecked())
+
     def test_output_selector_chooses_folder_in_single_mode(self):
         with mock.patch.object(QtWidgets.QFileDialog, "getExistingDirectory", return_value=str(self.root)):
             self.widget.select_output_file()
