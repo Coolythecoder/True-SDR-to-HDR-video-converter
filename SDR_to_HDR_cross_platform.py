@@ -28,6 +28,9 @@ from youtube_export_analysis import (
     measure_audio_loudness,
     measure_content_light,
 )
+from creative_hdr import active_grade, require_creative_filters, probe_grade_geometry
+from creative_hdr_pipeline import grade_command
+from creative_hdr_ui import CreativeHDRPanel
 
 class ConversionThread(QtCore.QThread):
     update_status = QtCore.pyqtSignal(str)
@@ -68,7 +71,7 @@ class ConversionThread(QtCore.QThread):
                             break
                         failed += 1
                         self.log_output.emit(
-                            "YouTube export analysis failed for {}: {}".format(name, exc)
+                            "HDR export analysis failed for {}: {}".format(name, exc)
                         )
                         continue
                     if self._cancel_requested:
@@ -201,7 +204,9 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.toggle_override_fields()
 
     def toggle_override_fields(self):
-        enabled = self.bit_depth.currentText() == "10" and self.override_metadata.isChecked()
+        creative = self.creative_panel.isChecked()
+        self.override_metadata.setEnabled(self.bit_depth.currentText() == "10" and not creative)
+        enabled = self.bit_depth.currentText() == "10" and self.override_metadata.isChecked() and not creative
         self.max_cll_input.setEnabled(enabled)
         self.max_fall_input.setEnabled(enabled)
 
@@ -236,6 +241,8 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         self.bit_depth.setToolTip("10-bit output is HDR PQ; 8-bit output stays SDR.")
         layout.addWidget(self.bit_depth_label)
         layout.addWidget(self.bit_depth)
+        self.creative_panel = CreativeHDRPanel(self)
+        layout.addWidget(self.creative_panel)
 
         self.color_processing_label = QtWidgets.QLabel()
         self.embed_metadata = QtWidgets.QCheckBox("Embed HDR10 mastering metadata (x265)")
@@ -333,7 +340,6 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         layout.addWidget(self.cancel_btn)
         layout.addWidget(self.status_label)
         # Keep controls accessible on low-resolution/125%-scaled desktops.
-        # The original fixed-height window could hide the export buttons.
         page = QtWidgets.QWidget(self)
         page.setLayout(layout)
         scroll = QtWidgets.QScrollArea(self)
@@ -344,6 +350,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         root_layout.addWidget(scroll)
         self.setLayout(root_layout)
         self.bit_depth.currentTextChanged.connect(self.update_hdr_controls)
+        self.creative_panel.toggled.connect(self.toggle_override_fields)
         self.update_hdr_controls(self.bit_depth.currentText())
 
     def select_input_file(self):
@@ -367,6 +374,9 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         bit_depth = self.bit_depth.currentText()
         quality = str(self.cq_slider.value())
         source_profile = source_profile or DEFAULT_SDR_PROFILE
+        grade = self.creative_panel.settings()
+        if active_grade(grade) and bit_depth != "10":
+            raise ValueError("Creative HDR requires 10-bit output; disable it for SDR export.")
 
         if use_gpu:
             encoder = "hevc_nvenc" if bit_depth == "10" else "h264_nvenc"
@@ -381,8 +391,6 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
 
         ffmpeg_cmd = [ffmpeg_exe, "-y", "-i", input_path]
         if bit_depth == "10":
-            # IMPORTANT: Do not tag SDR YUV as PQ. Actually transform the
-            # pixel values, through display-linear BT.2020, before encoding.
             ffmpeg_cmd += [
                 "-vf",
                 build_sdr_to_pq_filter(
@@ -399,16 +407,14 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             "-pix_fmt", pixel_format,
         ] + encoder_settings
 
-        # Static ST 2086 + MaxCLL/MaxFALL SEI in x265 only. NVENC still
-        # receives valid PQ/BT.2020 signalling, but not invented ST 2086.
         if (
             bit_depth == "10" and encoder == "libx265"
             and source_profile["primaries"] == "bt709"
             and (self.embed_metadata.isChecked() or self.generate_metadata.isChecked())
         ):
             max_cll = self.hdr_reference_nits.value()
-            max_fall = 0  # "unknown", not an estimated per-frame average
-            if self.override_metadata.isChecked():
+            max_fall = 0
+            if self.override_metadata.isChecked() and not active_grade(grade):
                 cll_text = self.max_cll_input.text().strip()
                 fall_text = self.max_fall_input.text().strip()
                 if cll_text:
@@ -432,7 +438,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         else:
             ffmpeg_cmd += ["-c:a", "aac", "-b:a", "128k"]
         ffmpeg_cmd.append(output_path)
-        return ffmpeg_cmd
+        return grade_command(ffmpeg_cmd, source_profile, self.hdr_reference_nits.value(), grade)
 
     def start_conversion(self):
         self._start_conversion(youtube_mode=False)
@@ -452,10 +458,17 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             return
 
         bit_depth = "10" if youtube_mode else self.bit_depth.currentText()
+        grade = self.creative_panel.settings()
+        creative = active_grade(grade)
+        reference_white = self.hdr_reference_nits.value()
         suffix = YOUTUBE_SUFFIX if youtube_mode else (
             "_HDR" if bit_depth == "10" else "_SDR"
         )
         try:
+            if creative:
+                grade.validate(reference_white)
+                if bit_depth != "10":
+                    raise ValueError("Creative HDR requires 10-bit output; disable it for SDR export.")
             jobs = plan_conversion_jobs(
                 input_path, output_path, self.batch_mode.isChecked(),
                 output_suffix=suffix,
@@ -478,6 +491,14 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             return
 
         ffprobe_exe = find_ffprobe(ffmpeg_exe)
+        if creative:
+            try:
+                if not ffprobe_exe:
+                    raise ValueError("Creative HDR requires FFprobe for post-grade light analysis.")
+                require_creative_filters(ffmpeg_exe)
+            except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+                self.status_label.setText("Status: {}".format(exc))
+                return
         if youtube_mode:
             if not ffprobe_exe:
                 self.status_label.setText(
@@ -517,7 +538,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 use_gpu = False
 
         if bit_depth == "10" and use_gpu and (
-            self.embed_metadata.isChecked() or self.generate_metadata.isChecked()
+            creative or self.embed_metadata.isChecked() or self.generate_metadata.isChecked()
         ):
             self.log_output.appendPlainText(
                 "Notice: NVENC produces PQ/BT.2020 HDR, but this path does not "
@@ -529,10 +550,16 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
         quality_crf, quality_preset = YOUTUBE_QUALITY_PROFILES[
             self.youtube_quality.currentText()
         ]
-        analyse_light = youtube_mode and self.youtube_analyse_light.isChecked()
+        analyse_light = creative or (youtube_mode and self.youtube_analyse_light.isChecked())
         normalize_audio = youtube_mode and self.youtube_normalize_audio.isChecked()
-        # Explicit HDR overrides take precedence over auto-analysis.
-        if youtube_mode and self.override_metadata.isChecked() and analyse_light:
+        # Creative grading must measure the changed image, not reuse old values.
+        if creative:
+            self.log_output.appendPlainText(
+                "Creative HDR enabled: {}. Post-grade MaxCLL/MaxFALL analysis is "
+                "mandatory; manual light values are not reused. The peak is a "
+                "virtual BT.2020 mastering target, not a measured display.".format(grade)
+            )
+        elif youtube_mode and self.override_metadata.isChecked() and analyse_light:
             analyse_light = False
             self.log_output.appendPlainText(
                 "Notice: manual HDR light-level overrides take precedence "
@@ -544,9 +571,9 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 if youtube_mode:
                     source_info = validate_youtube_source(ffprobe_exe, source, profile)
                     youtube_preflights[source] = (profile, source_info)
-                    white_nits = self.hdr_reference_nits.value()
+                    white_nits = reference_white
                     max_cll, max_fall = white_nits, 0
-                    if self.override_metadata.isChecked():
+                    if self.override_metadata.isChecked() and not creative:
                         text_cll = self.max_cll_input.text().strip()
                         text_fall = self.max_fall_input.text().strip()
                         if text_cll:
@@ -557,13 +584,16 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                             if not text_fall.isdigit():
                                 raise ValueError("MaxFALL must be a nonnegative integer.")
                             max_fall = int(text_fall)
-                    commands.append(build_youtube_hdr_command(
+                    command = build_youtube_hdr_command(
                         ffmpeg_exe, source, destination, profile,
                         white_nits=white_nits, crf=quality_crf,
                         max_cll=max_cll, max_fall=max_fall, preset=quality_preset,
-                    ))
+                    )
+                    commands.append(grade_command(command, profile, white_nits, grade))
                 else:
-                    if bit_depth == "10" and profile["primaries"] != "bt709":
+                    if creative:
+                        youtube_preflights[source] = (profile, probe_grade_geometry(ffprobe_exe, source))
+                    if bit_depth == "10" and profile["primaries"] != "bt709" and not creative:
                         self.log_output.appendPlainText(
                             "Notice: {} has non-BT.709 primaries; static mastering-display "
                             "metadata will be omitted.".format(os.path.basename(source))
@@ -571,7 +601,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                     commands.append(self.build_ffmpeg_command(
                         ffmpeg_exe, source, destination, use_gpu, profile
                     ))
-        except ValueError as exc:
+        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
             self.status_label.setText("Status: {}".format(exc))
             return
 
@@ -590,10 +620,8 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
             )
 
         prepare_job = None
-        if youtube_mode and (analyse_light or normalize_audio):
-            # Everything the worker needs is snapshotted on the GUI thread.
-            reference_white = self.hdr_reference_nits.value()
-
+        if analyse_light or normalize_audio:
+            # Settings and reference white are snapshotted on the GUI thread.
             def prepare_job(ffmpeg_cmd, worker):
                 source = ffmpeg_cmd[ffmpeg_cmd.index("-i") + 1]
                 profile, info = youtube_preflights[source]
@@ -610,8 +638,8 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 audio_stats = None
                 if analyse_light:
                     worker.update_status.emit(
-                        "Status: Measuring MaxCLL/MaxFALL: {}".format(
-                            os.path.basename(source)
+                        "Status: Measuring {}MaxCLL/MaxFALL: {}".format(
+                            "post-grade " if creative else "", os.path.basename(source)
                         )
                     )
                     light_levels = measure_content_light(
@@ -619,6 +647,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                         int(info["width"]), int(info["height"]),
                         reference_white, register_process=register_process,
                         cancelled=cancelled, progress=worker.log_output.emit,
+                        grade=grade if creative else None,
                     )
                     worker.log_output.emit(
                         "Measured HDR light levels: MaxCLL={} nits, "
@@ -653,6 +682,7 @@ class SDRtoHDRConverter(QtWidgets.QWidget):
                 return apply_youtube_analysis(
                     ffmpeg_cmd, reference_white,
                     light_levels=light_levels, audio_measurements=audio_stats,
+                    grade=grade if creative else None,
                 )
 
         self.conversion_thread = ConversionThread(
