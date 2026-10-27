@@ -40,7 +40,7 @@ Processing acceleration changes neither the selected quality profile nor the cho
 | Conversion from linear light to PQ / 10-bit YUV | CPU zscale, deliberately retained |
 | YouTube HEVC encoding | CPU x265, unchanged |
 | Audio / mux / output verification | CPU, unchanged |
-| Preview grade | Optional OpenCL GPU |
+| Preview grade | Optional OpenCL GPU, with a CPU reference render for every result |
 | Preview SDR viewing transform and Qt display | Existing CPU path |
 
 There are explicit CPU/GPU transfers. This is **not an end-to-end zero-copy CUDA pipeline**. The first version targets the expensive generic CPU grading equations and analysis readback, without replacing the established colour transforms with a different tone mapper or reducing analysis quality.
@@ -61,7 +61,11 @@ The export worker executes a small GPU grading and reduction test against the CP
 
 If accelerated analysis fails, the full scan is restarted on the CPU and that file's encode uses CPU processing. Partial measurements are discarded. Cancellation is not treated as a reason to restart work. A failed device check is logged, rather than silently claiming GPU use.
 
-The live preview checks its initial accelerated image against the CPU rendering. Failed devices or excessive differences fall back to the CPU view. All work remains asynchronous; superseded results are discarded. Temporary generated shader files are retained until their process finishes, then cleaned up. Preview remains an **SDR tone-mapped approximation**, not a native HDR display surface.
+The live preview checks **every accelerated result** against a CPU rendering of the same cached float source frame, geometry and grading settings before displaying it. A previously valid result, including a black opening frame, does not authorize future frames. Excessive differences immediately display the complete CPU reference and keep the preview on CPU until acceleration is explicitly toggled off/on or the app is restarted. The preview status retains `CPU preview (GPU parity check failed)` rather than silently losing the reason. A missing or failed CPU reference is reported as an error; unchecked GPU pixels are never displayed.
+
+All preview work remains asynchronous; results superseded by seeking, source changes, resets, pausing or closing are discarded. Temporary generated shader files are retained until their process finishes, then cleaned up. Preview remains an **SDR tone-mapped approximation**, not a native HDR display surface.
+
+**Preview validation has a cost:** a successful GPU preview also needs a CPU reference render. This is a correctness/recovery safeguard, not a preview-speed improvement. After a mismatch, subsequent previews use only the original CPU path and no longer repeat GPU attempts. Export processing options and quality settings are not modified by a preview fallback. Because the shared GPU grading backend is still used for exports when enabled, a preview failure is not proof that accelerated exports are unaffected: keep GPU grading disabled for important exports until a short output comparison has validated that machine's accelerated route. NVDEC can remain independently enabled.
 
 A hardware failure during the final encoding pass is reported as a failed job; it is not silently converted into success or automatically restarted with potentially different metadata. Disable the relevant acceleration option and retry after inspecting the log.
 
@@ -81,9 +85,11 @@ With accurate conversion and no creative grade, `grade=CPU` is expected even whe
 
 Tests execute the real OpenCL kernels against the CPU reference, including all grading controls, values above SDR white, negative inputs, partial tiles and high peak ceilings. Additional tests check a real GPU-assisted HDR10 encode, decoded PQ luminance, measured SEI metadata, unchanged YouTube options, asynchronous preview, stale-result suppression, cancellation and CPU recovery.
 
-The dedicated Linux CI job uses **PoCL software OpenCL on a CPU** to execute the kernels reproducibly. That validates the implementation and API integration; it is not a physical NVIDIA/AMD benchmark. Windows/macOS GUI/contract tests are distinct from hardware GPU validation. Native RTX 5080 execution and speed have not been measured in this environment.
+Preview regressions include a successful black opening frame followed by a corrupted right-hand region, changes to grade/source/resolution, persistent fallback, invalid or failed CPU references, and stale callbacks after reset/close/pause. Real OpenCL preview comparisons exercise nonuniform patterns at 480×270, 640×360 and 960×540, including the right edge of the graded frame.
 
-Performance depends on source, resolution, enabled controls, GPU driver, transfer overhead and the retained x265 workload. Short previews can be limited by process/device startup. A CPU-bound x265 Slow encode will remain CPU-bound even after its surrounding processing is accelerated. Compare the same short source and settings on your machine before drawing conclusions about the speedup.
+The dedicated Linux CI job uses **PoCL software OpenCL on a CPU** to execute the kernels reproducibly. That validates the implementation and API integration; it is not a physical NVIDIA/AMD benchmark. Windows/macOS GUI/contract tests are distinct from hardware GPU validation. Native RTX 5080 execution and speed have not been measured in this environment. The automatic preview recovery does not claim to repair an underlying hardware-specific driver or kernel defect.
+
+Performance depends on source, resolution, enabled controls, GPU driver, transfer overhead and the retained x265 workload. Short previews can be limited by process/device startup and the CPU validation described above. A CPU-bound x265 Slow encode will remain CPU-bound even after its surrounding processing is accelerated. Compare the same short source and settings on your machine before drawing conclusions about the speedup.
 
 ## Build
 
