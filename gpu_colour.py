@@ -169,7 +169,12 @@ class GPUPlan:
             for i, c in enumerate('rgb'):
                 graph.append(''.join('[{}{}{}]'.format(prefix,s,i) for s in 'rgb') +
                              program + 'grade_{},hwdownload,format=grayf32le[{}o{}]'.format(c,prefix,c))
-            graph.append('[{0}og][{0}ob][{0}or]mergeplanes=0x001020:format=gbrpf32le'.format(prefix))
+            # Separate grayscale hardware frames do not reliably retain colour
+            # properties. Reassert the KNOWN float linear BT.2020 interpretation
+            # after reassembly so the following PQ zscale cannot guess wrong.
+            graph.append(('[{0}og][{0}ob][{0}or]mergeplanes=0x001020:format=gbrpf32le,'
+                          'setparams=range=full:color_primaries=bt2020:'
+                          'color_trc=linear:colorspace=gbr').format(prefix))
         return ';'.join(graph)
 
     def export_command(self, command, profile):
