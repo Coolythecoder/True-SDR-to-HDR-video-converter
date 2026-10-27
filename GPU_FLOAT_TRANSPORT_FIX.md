@@ -44,11 +44,16 @@ The new test covers all preview sizes, non-aligned geometry, two successive
 frames and 3840x2160 float output. Exact byte equality checks negative values,
 HDR headroom, channel order and the rightmost/bottommost pixels.
 
-The legacy CI job additionally runs the original unprotected merge, requires
-that it reproduce the half-row loss, then requires the repaired transport to
-preserve the entire frame. It also executes the existing OpenCL parity,
-full-size preview and HDR10 media tests using PoCL software OpenCL. The current
-FFmpeg workflow continues to exercise the same shared transport.
+The legacy CI jobs run the original unprotected merge, require it to reproduce
+the half-row loss, then require the repaired transport to preserve the entire
+frame. The FFmpeg 4.4 job tests this CPU-side transport in isolation: that
+runtime cannot download the grayf32le OpenCL frames needed by this application,
+so it is not claimed to support the complete accelerated pipeline.
+
+A separate Debian 12 / FFmpeg 5.1 job runs the full regression suite, including
+OpenCL parity, full-size previews and HDR10 media tests, using PoCL software
+OpenCL. The current-FFmpeg workflow continues to exercise the same shared
+transport. Neither job relaxes the original pixel-comparison assertions.
 
 PoCL executes the kernels on a CPU; passing it is not a physical NVIDIA
 benchmark. The user's precise FFmpeg binary and RTX 5080 are not available in
