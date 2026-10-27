@@ -30,6 +30,6 @@ jobs:
           ffmpeg -hide_banner -filters | grep zscale
           ffmpeg -hide_banner -encoders | grep libx265
       - name: Compile Python sources
-        run: python -m compileall -q SDR_to_HDR_cross_platform.py conversion_paths.py hdr_processing.py youtube_hdr_export.py tests
+        run: python -m compileall -q SDR_to_HDR_cross_platform.py conversion_paths.py hdr_processing.py youtube_hdr_export.py youtube_export_analysis.py tests
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
