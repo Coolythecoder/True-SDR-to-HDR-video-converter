@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from fractions import Fraction
 import math
 from pathlib import Path
-
 from creative_hdr import CreativeHDRSettings, build_creative_filter
 from hdr_processing import (
     DEFAULT_SDR_PROFILE, MATRICES, PRIMARIES, TRANSFERS, HDR_TRANSFERS,
@@ -130,18 +129,14 @@ def decode_command(ffmpeg, source, seconds, bound=640):
 
 
 def viewing_filter(white_nits=200):
-    """Fixed SDR viewing scale for BOTH halves; does not follow the grade peak.
-
-    Reference white is honoured in absolute light. Changing grade strength or
-    peak must not auto-normalize the result and hide the change being made.
-    """
+    """Fixed SDR viewing scale for BOTH halves, independent of grade peak."""
     if not isinstance(white_nits, (int, float)) or not math.isfinite(white_nits) or not 80 <= white_nits <= 400:
         raise ValueError('HDR reference white must be between 80 and 400 nits.')
     gain = white_nits / 200.0
     gain_filter = ''
     if gain != 1:
         gain_filter = "geq=r='r(X,Y)*{0}':g='g(X,Y)*{0}':b='b(X,Y)*{0}',".format(gain)
-    return (gain_filter + 'tonemap=mobius:param=0.3:desat=2:peak=5,'
+    return (gain_filter + 'tonemap=mobius:param=0.3:desat=0:peak=5,'
             'zscale=pin=bt2020:tin=linear:min=gbr:rin=full:'
             'p=bt709:t=iec61966-2-1:m=gbr:r=full,'
             'format=gbrp,format=rgb24')
@@ -156,7 +151,10 @@ def render_command(ffmpeg, width, height, grade=None, white_nits=200):
     view = viewing_filter(white_nits)
     change = build_creative_filter(grade, white_nits).lstrip(',')
     after = (change + ',' if change else '') + view
-    graph = ('[0:v]split=2[a][b];[a]' + view + '[before];[b]' + after +
+    # Rawvideo transport does not carry metadata. Restore the known float
+    # colour interpretation before the display transform, rather than guess.
+    graph = ('[0:v]setparams=range=full:color_primaries=bt2020:'
+             'color_trc=linear:colorspace=gbr,split=2[a][b];[a]' + view + '[before];[b]' + after +
              '[after];[before][after]hstack=inputs=2,format=rgb24[out]')
     return [ffmpeg, '-hide_banner', '-nostdin', '-v', 'error',
             '-f', 'rawvideo', '-pixel_format', 'gbrpf32le',
