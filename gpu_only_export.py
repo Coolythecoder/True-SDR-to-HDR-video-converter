@@ -214,15 +214,44 @@ def load_cuda():
                          'No CPU fallback was used. ' + str(exc)[-600:]) from exc
 
 
-class EncoderFrame:
-    """Keep the P010 owner alive and expose correctly byte-strided CAI planes."""
+class InputProbeFrame:
+    """Typed NV12/P010 planes for the CUDA colour-reference self-test."""
     def __init__(self, buffer, height, width):
+        if height % 2 or width % 2 or buffer.shape != (height * 3 // 2, width):
+            raise ValueError('Invalid semiplanar probe frame geometry.')
+        if not buffer.flags.c_contiguous:
+            raise ValueError('Probe frame must have contiguous planes.')
         self.buffer = buffer
         self.planes = [buffer[:height].reshape(height, width, 1),
-                       buffer[height:].reshape(height//2, width//2, 2)]
+                       buffer[height:].reshape(height // 2, width // 2, 2)]
 
     def cuda(self):
         return self.planes
+
+
+class EncoderFrame(InputProbeFrame):
+    """Expose packed GPU P010 as byte-typed CUDA Array Interface planes.
+
+    PyNvVideoCodec 2.2.3's native Encode() rejects <u2 CUDA array typestr,
+    even though P010 stores 16-bit words. Keep the actual contiguous little-
+    endian uint16 GPU allocation unchanged, but expose zero-copy uint8 views
+    with the original pixel geometry and the *byte* strides of P010. The
+    encoder's configured P010 format determines the stored sample width.
+    """
+    def __init__(self, buffer, height, width):
+        super().__init__(buffer, height, width)
+        if buffer.dtype != np.dtype('uint16'):
+            raise ValueError('P010 encoder requires native-endian uint16 samples.')
+        # view() and these slices/reshapes are zero-copy (no GPU->CPU transfer).
+        byte_rows = buffer.view(np.uint8).reshape(height * 3 // 2, width * 2)
+        self.byte_rows = byte_rows  # retain the underlying byte view/owner
+        self.encoder_planes = [
+            byte_rows[:height].reshape(height, width, 2)[:, :, :1],
+            byte_rows[height:].reshape(height // 2, width // 2, 4)[:, :, ::2],
+        ]
+
+    def cuda(self):
+        return self.encoder_planes
 
 
 class CUDAProcessor:
@@ -319,7 +348,7 @@ def validate_cuda_backend(cp, nvc, ffmpeg, ffprobe, source_info, settings, strea
                 host <<= 6
             input_file.write_bytes(host.tobytes())
             device = cp.asarray(host)
-            frame = EncoderFrame(device,height,width)
+            frame = InputProbeFrame(device,height,width)
             actual = processor.process(frame,linear_probe=True).get()
             raw = _run([ffmpeg,'-v','error','-f','rawvideo','-pixel_format',
                         'p010le' if info.bits==10 else 'nv12','-video_size',f'{width}x{height}',
