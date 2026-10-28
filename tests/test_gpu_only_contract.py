@@ -73,35 +73,49 @@ class ContractTests(unittest.TestCase):
         self.assertIn('chroma_sample_loc_type=1',cmd[cmd.index('-bsf:v')+1])
 
     def test_p010_encoder_plane_shapes_and_byte_strides(self):
+        class CUDAArrayStub(np.ndarray):
+            # Host storage only for checking the descriptor; never sent to NVENC.
+            @property
+            def __cuda_array_interface__(self):
+                return dict(self.__array_interface__, version=3, stream=1)
+
         height, width = 18, 34
-        raw = np.zeros((height * 3 // 2, width), dtype=np.uint16)
+        raw = np.zeros((height * 3 // 2, width), dtype=np.uint16).view(CUDAArrayStub)
         raw[0, 0], raw[height, 0], raw[height, 1] = 0xA1B2, 0xC3D4, 0xE5F6
 
-        # CUDA grading still consumes native uint16 planes; only NVENC sees
-        # the byte-typed CAI interface (the <u2 interface was rejected).
+        # CUDA grading still consumes native uint16 planes; NVENC requires
+        # '|u2' specifically (both the '<u2' and '|u1' interfaces are rejected).
         probe_y, probe_uv = InputProbeFrame(raw, height, width).cuda()
         self.assertEqual(probe_y.dtype, np.dtype('uint16'))
         self.assertEqual(probe_uv.strides, (width * 2, 4, 2))
 
         encoder = EncoderFrame(raw, height, width)
-        y, uv = encoder.cuda()
-        self.assertEqual(y.shape, (height, width, 1))
-        self.assertEqual(uv.shape, (height // 2, width // 2, 2))
-        self.assertEqual(y.dtype.str, '|u1')
-        self.assertEqual(uv.dtype.str, '|u1')
-        self.assertEqual(y.strides, (width * 2, 2, 1))
-        self.assertEqual(uv.strides, (width * 2, 4, 2))
-        self.assertEqual(y.ctypes.data, raw.ctypes.data)
-        self.assertEqual(uv.ctypes.data - raw.ctypes.data, height * width * 2)
-        self.assertTrue(np.shares_memory(raw, y))
-        self.assertTrue(np.shares_memory(raw, uv))
-        self.assertEqual(int(y[0,0,0]), 0xB2)
-        self.assertEqual(tuple(int(v) for v in uv[0,0]), (0xD4, 0xF6))
+        planes = encoder.cuda()
+        y, uv = [plane.__cuda_array_interface__ for plane in planes]
+        self.assertEqual(y['shape'], (height, width, 1))
+        self.assertEqual(uv['shape'], (height // 2, width // 2, 2))
+        self.assertEqual(y['data'][0], raw.ctypes.data)
+        self.assertEqual(uv['data'][0] - raw.ctypes.data, height * width * 2)
+        for plane in planes:
+            original = plane.array.__cuda_array_interface__
+            adapted = plane.__cuda_array_interface__
+            self.assertEqual(adapted['typestr'], '|u2')
+            self.assertEqual(adapted['descr'], [('', '|u2')])
+            for key in ('shape', 'strides', 'data', 'stream', 'version'):
+                self.assertEqual(adapted[key], original[key])
+            self.assertEqual(original['typestr'], '<u2')
+            self.assertTrue(np.shares_memory(raw, plane.array))
+            # Consumers cannot mutate the descriptor retained by the owner.
+            adapted['typestr'] = '|u1'
+            self.assertEqual(plane.__cuda_array_interface__['typestr'], '|u2')
+        self.assertEqual(int(planes[0].array[0,0,0]), 0xA1B2)
+        self.assertEqual(tuple(int(v) for v in planes[1].array[0,0]), (0xC3D4, 0xE5F6))
         # No re-encoding, endian swap or copy of the 16-bit P010 words.
-        self.assertEqual(encoder.byte_rows.tobytes(), raw.tobytes())
+        self.assertIs(encoder.buffer, raw)
 
     def test_p010_encoder_does_not_silently_accept_wrong_layout(self):
         for raw in (np.zeros((27,34), dtype=np.uint8),
+                    np.zeros((27,34), dtype='>u2'),
                     np.zeros((27,34), dtype=np.uint16)[:, ::-1],
                     np.zeros((27,33), dtype=np.uint16)):
             with self.subTest(shape=raw.shape, strides=raw.strides, dtype=raw.dtype), self.assertRaises(ValueError):

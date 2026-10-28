@@ -109,17 +109,32 @@ def validate_timestamps(timestamps, info):
     return len(pts)
 
 
-def _run(command, cancelled, register, timeout=120):
-    """Cancellable subprocess capture; commands are argument arrays, never shell."""
+def _run(command, cancelled, register, timeout=120, *, stage='media command', log=None):
+    """Cancellable capture; full-movie operations use timeout=None.
+
+    A movie's scan/mux duration depends on its size, storage and audio work.
+    Keep polling for cancellation without imposing an arbitrary total limit.
+    Small metadata probes and startup checks retain a finite deadline.
+    """
+    if cancelled():
+        raise ExportCancelled()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     register(process)
     start = time.monotonic()
+    last_log = start
     try:
+        if log is not None:
+            log('GPU-only: {}.'.format(stage))
         while True:
             if cancelled():
                 raise ExportCancelled()
-            if time.monotonic() - start > timeout:
-                raise ValueError('GPU-only validation/mux command timed out.')
+            now = time.monotonic()
+            if timeout is not None and now - start > timeout:
+                raise ValueError('GPU-only {} timed out after {:g} seconds.'.format(stage, timeout))
+            if log is not None and now - last_log >= 15:
+                log('GPU-only: {} still running ({:.0f}s elapsed; Cancel remains available).'.format(
+                    stage, now - start))
+                last_log = now
             try:
                 out, err = process.communicate(timeout=.2)
                 break
@@ -128,7 +143,8 @@ def _run(command, cancelled, register, timeout=120):
         if cancelled():
             raise ExportCancelled()
         if process.returncode:
-            raise ValueError(err.decode('utf-8', errors='replace')[-2000:] or 'Media command failed.')
+            detail = err.decode('utf-8', errors='replace')[-2000:] or 'Media command failed.'
+            raise ValueError('GPU-only {} failed: {}'.format(stage, detail))
         return out
     finally:
         if process.poll() is None:
@@ -180,19 +196,40 @@ def mux_command(ffmpeg, elementary, source, destination, info, settings):
 _DLL_HANDLES = []
 
 
-def load_cuda():
-    """Lazy imports keep the normal application usable without CUDA packages."""
+def _configure_cuda_environment():
+    """Locate bundled or pip-installed CUDA before CuPy caches its CUDA path."""
     import sys
     import ctypes
+    from importlib import metadata
     root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
     bundled = root / 'cuda'
-    if bundled.is_dir():
+    wheel_roots = {}
+    if os.name == 'nt' and not (bundled / 'bin').is_dir():
+        # The wheels may live in user-site or a venv's base environment, not
+        # necessarily under sys.prefix. Query the active installation instead.
+        for package, folder in (('nvidia-cuda-runtime-cu12', 'cuda_runtime'),
+                                ('nvidia-cuda-nvrtc-cu12', 'cuda_nvrtc')):
+            try:
+                dist = metadata.distribution(package)
+            except metadata.PackageNotFoundError:
+                continue
+            path = Path(dist.locate_file('nvidia/' + folder))
+            if (path / 'bin').is_dir():
+                wheel_roots[folder] = path
+    if (bundled / 'bin').is_dir():
         os.environ['CUDA_PATH'] = str(bundled)
-        os.environ['PATH'] = str(bundled / 'bin') + os.pathsep + os.environ.get('PATH', '')
+    elif os.name == 'nt':
+        configured = os.environ.get('CUDA_PATH')
+        if not configured or not Path(configured).is_dir():
+            nvcc = shutil.which('nvcc')
+            cuda_root = Path(nvcc).parent.parent if nvcc else wheel_roots.get('cuda_runtime')
+            if cuda_root is not None:
+                # CuPy's Windows import needs a root with bin/; the runtime
+                # wheel also supplies include/. NVRTC's separate bin is below.
+                os.environ['CUDA_PATH'] = str(cuda_root)
     if os.name == 'nt' and hasattr(os, 'add_dll_directory'):
         paths = [root / 'PyNvVideoCodec', bundled / 'bin']
-        paths += [Path(sys.prefix) / 'Lib/site-packages/nvidia' / pkg / 'bin'
-                  for pkg in ('cuda_runtime', 'cuda_nvrtc')]
+        paths += [path / 'bin' for path in wheel_roots.values()]
         for path in paths:
             if path.is_dir():
                 _DLL_HANDLES.append(os.add_dll_directory(str(path)))
@@ -202,7 +239,12 @@ def load_cuda():
                 for builtin in path.glob('nvrtc-builtins64_*.dll'):
                     if '.alt.' not in builtin.name:
                         _DLL_HANDLES.append(ctypes.WinDLL(str(builtin)))
+
+
+def load_cuda():
+    """Lazy imports keep the normal application usable without CUDA packages."""
     try:
+        _configure_cuda_environment()
         import cupy as cp
         import PyNvVideoCodec as nvc
         if cp.cuda.runtime.getDeviceCount() < 1:
@@ -229,29 +271,66 @@ class InputProbeFrame:
         return self.planes
 
 
-class EncoderFrame(InputProbeFrame):
-    """Expose packed GPU P010 as byte-typed CUDA Array Interface planes.
+class _P010EncoderPlane:
+    """Adapt only the type spelling expected by PyNvVideoCodec 2.2.3.
 
-    PyNvVideoCodec 2.2.3's native Encode() rejects <u2 CUDA array typestr,
-    even though P010 stores 16-bit words. Keep the actual contiguous little-
-    endian uint16 GPU allocation unchanged, but expose zero-copy uint8 views
-    with the original pixel geometry and the *byte* strides of P010. The
-    encoder's configured P010 format determines the stored sample width.
+    Its P010 importer requires '|u2', rejecting both CuPy's '<u2' and '|u1'.
+    Keep the uint16 allocation, geometry, byte strides and stream intact.
+    This compatibility descriptor is for NVENC only, not CUDA colour input.
     """
+    def __init__(self, array):
+        self.array = array  # retain the GPU allocation until encoding finishes
+
+    @property
+    def __cuda_array_interface__(self):
+        interface = dict(self.array.__cuda_array_interface__)
+        interface['typestr'] = '|u2'
+        if 'descr' in interface:
+            interface['descr'] = [('', '|u2')]
+        return interface
+
+
+class EncoderFrame(InputProbeFrame):
+    """Expose packed GPU P010 through the native encoder's CUDA interface."""
     def __init__(self, buffer, height, width):
         super().__init__(buffer, height, width)
         if buffer.dtype != np.dtype('uint16'):
             raise ValueError('P010 encoder requires native-endian uint16 samples.')
-        # view() and these slices/reshapes are zero-copy (no GPU->CPU transfer).
-        byte_rows = buffer.view(np.uint8).reshape(height * 3 // 2, width * 2)
-        self.byte_rows = byte_rows  # retain the underlying byte view/owner
-        self.encoder_planes = [
-            byte_rows[:height].reshape(height, width, 2)[:, :, :1],
-            byte_rows[height:].reshape(height // 2, width // 2, 4)[:, :, ::2],
-        ]
+        self.encoder_planes = [_P010EncoderPlane(plane) for plane in self.planes]
 
     def cuda(self):
         return self.encoder_planes
+
+
+class _NVDECPlane:
+    """Adapt native decoder descriptors to CuPy without copying GPU pixels.
+
+    PyNvVideoCodec 2.2.3 returns list geometry and sample-unit strides, even
+    for P010. CUDA Array Interface consumers require tuples and byte strides.
+    Keep both native owners alive for as long as the CuPy view uses the data.
+    """
+    def __init__(self, plane, frame):
+        self.plane, self.frame = plane, frame
+
+    @property
+    def __cuda_array_interface__(self):
+        interface = dict(self.plane.__cuda_array_interface__)
+        dtype = np.dtype(interface['typestr'])
+        interface['shape'] = tuple(interface['shape'])
+        strides = interface.get('strides')
+        if strides is not None:
+            # Native P010 has unit sample stride for its last dimension. A
+            # conforming uint16 descriptor already has a two-byte stride.
+            scale = dtype.itemsize if strides[-1] == 1 else 1
+            interface['strides'] = tuple(stride * scale for stride in strides)
+        interface['typestr'] = dtype.str
+        if 'descr' in interface:
+            interface['descr'] = [('', dtype.str)]
+        if interface.get('stream') == 0:
+            # Zero is not a valid CAI stream token. The decode loop explicitly
+            # synchronizes its stream before handing the frame to this adapter.
+            interface.pop('stream')
+        return interface
 
 
 class CUDAProcessor:
@@ -274,6 +353,9 @@ class CUDAProcessor:
         planes = frame.cuda()
         if len(planes) != 2:
             raise ValueError('NVDEC did not return two semiplanar CUDA planes.')
+        # Self-test CuPy planes already implement the standard byte interface.
+        if not isinstance(frame, InputProbeFrame):
+            planes = [_NVDECPlane(plane, frame) for plane in planes]
         y, uv = (cp.asarray(p) for p in planes)
         dtype = cp.uint8 if info.bits == 8 else cp.uint16
         w, h = info.width, info.height
@@ -296,9 +378,11 @@ class CUDAProcessor:
         self.fall = cp.maximum(self.fall, cp.mean(self.light, dtype=cp.float64))
 
 
-def verify_output(ffprobe, path, info, count, cll, fall, cancelled, register):
+def verify_output(ffprobe, path, info, count, cll, fall, cancelled, register, *,
+                  timeout=None, log=None):
     data = json.loads(_run([ffprobe, '-v', 'error', '-select_streams', 'v:0', '-count_packets',
-                           '-show_streams', '-of', 'json', str(path)], cancelled, register, 600))
+                           '-show_streams', '-of', 'json', str(path)], cancelled, register,
+                          timeout, stage='output frame-count verification', log=log))
     v = data['streams'][0]
     required = {'codec_name': 'hevc', 'profile': 'Main 10', 'pix_fmt': 'yuv420p10le',
                 'color_primaries': 'bt2020', 'color_transfer': 'smpte2084',
@@ -314,12 +398,26 @@ def verify_output(ffprobe, path, info, count, cll, fall, cancelled, register):
     # One decoded verification frame is not bulk processing. No CPU fallback.
     first = json.loads(_run([ffprobe, '-v', 'error', '-select_streams', 'v:0',
                             '-read_intervals', '%+#1', '-show_frames', '-of', 'json', str(path)],
-                           cancelled, register))
+                           cancelled, register, stage='HDR10 metadata verification', log=log))
     side = first.get('frames', [{}])[0].get('side_data_list', [])
     light = [s for s in side if s.get('side_data_type') == 'Content light level metadata']
     master = [s for s in side if s.get('side_data_type') == 'Mastering display metadata']
     if not master or not light or (light[0].get('max_content'), light[0].get('max_average')) != (cll, fall):
         raise ValueError('GPU-only output is missing the measured HDR10 metadata.')
+
+
+def _write_encoded_packets(output, packets):
+    """Write all native encoder packets, including delayed frames at flush.
+
+    PyNvVideoCodec 2.2.3 returns a list of dictionaries with a bytes 'data'
+    field. Older versions return the bitstream directly. Packet metadata is
+    not part of the elementary stream; strict CFR timing is set during mux.
+    """
+    if isinstance(packets, list):
+        for packet in packets:
+            output.write(packet['data'])
+    else:
+        output.write(bytes(packets))
 
 
 def validate_cuda_backend(cp, nvc, ffmpeg, ffprobe, source_info, settings, stream, cancelled, register, log):
@@ -353,7 +451,8 @@ def validate_cuda_backend(cp, nvc, ffmpeg, ffprobe, source_info, settings, strea
             raw = _run([ffmpeg,'-v','error','-f','rawvideo','-pixel_format',
                         'p010le' if info.bits==10 else 'nv12','-video_size',f'{width}x{height}',
                         '-i',str(input_file),'-vf',build_sdr_to_linear_filter(profile,settings.grade,settings.white_nits),
-                        '-frames:v','1','-pix_fmt','gbrpf32le','-f','rawvideo','pipe:1'],cancelled,register)
+                        '-frames:v','1','-pix_fmt','gbrpf32le','-f','rawvideo','pipe:1'],cancelled,register,
+                       stage='startup colour-reference check')
             if len(raw) != width*height*12:
                 raise ValueError('Incomplete GPU-only CPU-reference self-test.')
             reference = np.frombuffer(raw,dtype='<f4').reshape(3,height,width)[[2,0,1]]
@@ -370,17 +469,17 @@ def validate_cuda_backend(cp, nvc, ffmpeg, ffprobe, source_info, settings, strea
         raw_path, out_path = Path(td)/'probe.hevc', Path(td)/'probe.mp4'
         metadata = sei_messages(settings,100,50)
         with raw_path.open('wb') as output:
-            output.write(bytes(encoder.Encode(surface,0,metadata)))
-            output.write(bytes(encoder.Encode(surface,0,metadata)))
-            output.write(bytes(encoder.EndEncode()))
+            _write_encoded_packets(output, encoder.Encode(surface,0,metadata))
+            _write_encoded_packets(output, encoder.Encode(surface,0,metadata))
+            _write_encoded_packets(output, encoder.EndEncode())
         # Reuse the video-only part of the mux recipe; there is no audio input.
         cmd = mux_command(ffmpeg,raw_path,raw_path,out_path,info,settings)
         second = cmd.index('-i',cmd.index('-i')+1)
         del cmd[second:second+2]
         mapping = cmd.index('1:a:0?')
         del cmd[mapping-1:mapping+1]
-        _run(cmd,cancelled,register)
-        verify_output(ffprobe,out_path,info,2,100,50,cancelled,register)
+        _run(cmd,cancelled,register,stage='startup MP4 packaging check')
+        verify_output(ffprobe,out_path,info,2,100,50,cancelled,register,timeout=120)
     log('GPU-only self-tests passed: colour reference, native P010 encode, timing and HDR10 metadata.')
 
 
@@ -394,11 +493,13 @@ def export_gpu_only(ffmpeg, ffprobe, source, destination, settings, log=print,
     if not source.is_file() or not destination.parent.is_dir():
         raise ValueError('Source or destination folder is unavailable.')
     original_stat = (source.stat().st_size, source.stat().st_mtime_ns)
-    probe = json.loads(_run([ffprobe, '-v', 'error', '-show_streams', '-of', 'json', str(source)], cancelled, register))
+    probe = json.loads(_run([ffprobe, '-v', 'error', '-show_streams', '-of', 'json', str(source)],
+                           cancelled, register, stage='input metadata probe', log=log))
     info = validate_source(probe)
     log('GPU-only: checking every packet timestamp before processing (no video decode).')
     packet_text = _run([ffprobe, '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-                        'packet=pts', '-of', 'csv=p=0', str(source)], cancelled, register, 600)
+                        'packet=pts', '-of', 'csv=p=0', str(source)], cancelled, register,
+                       timeout=None, stage='input timestamp scan', log=log)
     try:
         timestamps = [int(line.split(',')[0]) for line in packet_text.decode().splitlines() if line.strip()]
     except ValueError as exc:
@@ -466,19 +567,20 @@ def export_gpu_only(ffmpeg, ffprobe, source, destination, settings, log=print,
                 for frame in frames():
                     surface = processor.process(frame, encode=True)
                     stream.synchronize()
-                    output.write(bytes(encoder.Encode(surface, 0, sei)))
+                    _write_encoded_packets(output, encoder.Encode(surface, 0, sei))
                     encoded += 1
                     if encoded % 120 == 0:
                         log('frame={} fps={:.1f} GPU-only NVENC'.format(encoded, encoded/max(.001,time.monotonic()-started)))
-                output.write(bytes(encoder.EndEncode()))
+                _write_encoded_packets(output, encoder.EndEncode())
             stream.synchronize()
             if encoded != count or original_stat != (source.stat().st_size, source.stat().st_mtime_ns):
                 raise ValueError('Source or frame count changed between passes; export stopped.')
             if cancelled():
                 raise ExportCancelled()
             log('GPU-only: muxing the encoded video and selected audio; no video re-encoding.')
-            _run(mux_command(ffmpeg, raw, source, complete, info, settings), cancelled, register, 3600)
-            verify_output(ffprobe, complete, info, count, cll, fall, cancelled, register)
+            _run(mux_command(ffmpeg, raw, source, complete, info, settings), cancelled, register,
+                 timeout=None, stage='MP4 packaging and audio processing', log=log)
+            verify_output(ffprobe, complete, info, count, cll, fall, cancelled, register, log=log)
             if cancelled():
                 raise ExportCancelled()
             os.replace(complete, destination)

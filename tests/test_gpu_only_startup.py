@@ -28,5 +28,6 @@ class NativeStartupTests(TestCase):
             self.assertEqual(processor.call_args.args[1].width,256)
             verified.assert_called_once()
             self.assertEqual(verified.call_args.args[3:6],(2,100,50))
+            self.assertEqual(verified.call_args.kwargs['timeout'],120)
             sei=nvc.CreateEncoder.return_value.Encode.call_args.args[2]
             self.assertEqual([m[0]['sei_type'] for m in sei],[137,144])

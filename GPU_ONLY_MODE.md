@@ -90,6 +90,12 @@ to the source. The source must not be modified during export. The progress log
 includes measured analysis/encoding fps; there is no advertised speedup until
 measured on the actual machine.
 
+Full-file timestamp scans, MP4 packaging/audio processing and output frame-count
+verification have no fixed elapsed-time limit, so a long movie or slow disk
+does not abort an otherwise valid export. These stages report elapsed time
+every 15 seconds and remain cancellable. Short metadata probes and startup
+checks retain their time limits; an error identifies the stage that failed.
+
 ## Run or rebuild from source
 
 Use a separate Python 3.11 environment for the optional dependencies:
@@ -122,6 +128,21 @@ with NVRTC for compute_120 and opens the packaged Qt application without a GPU.
 Compilation is **not** execution. CI has no physical RTX 5080/NVDEC/NVENC device.
 The application therefore performs its own startup reference/native-codec
 checks on the selected machine before processing a full video.
+
+To run the optional hardware regression tests on an NVIDIA machine with the
+pinned dependencies and FFmpeg installed:
+
+```powershell
+$env:HDR_TEST_CUDA = '1'
+python -m unittest discover -s tests -p test_gpu_only_native.py -v
+```
+
+These check actual P010 pixel preservation and short 8/10-bit exports, including
+frame counts, 144 fps and fractional timing, colour tags and HDR10 metadata.
+Source runs locate the installed CUDA runtime wheels before importing CuPy;
+no machine-wide `CUDA_PATH` change is needed. The pinned PyNvVideoCodec version
+uses a special P010 array type spelling and returns encoded packet records;
+the GPU backend adapts those interfaces without copying video pixels to the CPU.
 
 Primary API references:
 - https://docs.nvidia.com/video-technologies/pynvvideocodec/pynvc-api-reference/encoder.html
